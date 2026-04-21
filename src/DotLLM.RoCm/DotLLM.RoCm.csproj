@@ -3,6 +3,7 @@
   <PropertyGroup>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Description>HIP/ROCm GPU backend for dotLLM — HSACO code objects loaded via the HIP Runtime API for attention, dequant, matmul, RoPE, softmax, and RMSNorm. Supports CPU/GPU hybrid offloading and KV-cache quantization.</Description>
+    <NoWarn>$(NoWarn);1591;CS1591</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
