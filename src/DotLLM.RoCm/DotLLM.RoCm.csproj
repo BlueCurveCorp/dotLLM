@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Description>HIP/ROCm GPU backend for dotLLM — HSACO code objects loaded via the HIP Runtime API for attention, dequant, matmul, RoPE, softmax, and RMSNorm. Supports CPU/GPU hybrid offloading and KV-cache quantization.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DotLLM.Tests.Unit" />
+    <InternalsVisibleTo Include="DotLLM.Tests.Integration" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DotLLM.Core\DotLLM.Core.csproj" />
+    <ProjectReference Include="..\DotLLM.Cpu\DotLLM.Cpu.csproj" />
+    <ProjectReference Include="..\DotLLM.Engine\DotLLM.Engine.csproj" />
+    <ProjectReference Include="..\DotLLM.Models\DotLLM.Models.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\native\hsaco\*.hsaco" Link="hsaco\%(Filename)%(Extension)" Condition="Exists('..\..\native\hsaco\')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!-- ROCm HSACO compilation: .hip to .hsaco via hipcc.
+       Runs automatically during build if hipcc is in PATH.
+       Skipped when ROCm/HIP SDK is not installed (CPU-only users
+       get pre-compiled HSACO from the repo). -->
+  <PropertyGroup>
+    <HipKernelDir>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '..', '..', 'native', 'kernels', 'rocm'))</HipKernelDir>
+    <HsacoOutputDir>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '..', '..', 'native', 'hsaco'))</HsacoOutputDir>
+  </PropertyGroup>
+
+  <!-- All .hip kernel files, default to precise math -->
+  <ItemGroup>
+    <HipKernel Include="$(HipKernelDir)\*.hip">
+      <FastMathFlag></FastMathFlag>
+    </HipKernel>
+    <!-- Element-wise kernels: safe for fast_math (no expf/rsqrtf/sinf/cosf accumulation) -->
+    <HipKernel Update="$(HipKernelDir)\add.hip;$(HipKernelDir)\add_f32.hip;$(HipKernelDir)\swiglu.hip;$(HipKernelDir)\swiglu_f32.hip;$(HipKernelDir)\convert.hip;$(HipKernelDir)\bias_add.hip;$(HipKernelDir)\bias_add_f32.hip;$(HipKernelDir)\embedding.hip;$(HipKernelDir)\embedding_f32out.hip;$(HipKernelDir)\dequant.hip;$(HipKernelDir)\quant_kv.hip">
+      <FastMathFlag>--use_fast_math</FastMathFlag>
+    </HipKernel>
+  </ItemGroup>
+
+  <!-- Compile stale .hip → .hsaco. Incremental via Inputs/Outputs. -->
+  <Target Name="CompileRoCmHsaco"
+          BeforeTargets="BeforeBuild"
+          Inputs="@(HipKernel)"
+          Outputs="@(HipKernel->'$(HsacoOutputDir)\%(Filename).hsaco')">
+    <!-- 1. Detect hipcc availability -->
+    <Exec Command="hipcc --version" IgnoreExitCode="true" StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="_HipccExitCode" />
+    </Exec>
+    <Message Condition="'$(_HipccExitCode)' != '0'" Importance="high"
+             Text="WARNING: .hip source is newer than .hsaco but hipcc not found in PATH. Pre-compiled HSACO may be stale. Install ROCm/HIP SDK to auto-compile kernels." />
+
+    <!-- 2. Compile stale .hip → .hsaco -->
+    <MakeDir Condition="'$(_HipccExitCode)' == '0'" Directories="$(HsacoOutputDir)" />
+    <Message Condition="'$(_HipccExitCode)' == '0'" Importance="high" Text="Compiling %(HipKernel.Filename).hip to HSACO" />
+    <Exec Condition="'$(_HipccExitCode)' == '0'"
+          Command='hipcc --genco --offload-arch=gfx1030 --offload-arch=gfx1100 --offload-arch=gfx90a --offload-arch=gfx942 %(HipKernel.FastMathFlag) -o "$(HsacoOutputDir)/%(HipKernel.Filename).hsaco" "%(HipKernel.FullPath)"'
+          StandardOutputImportance="low" />
+  </Target>
+
+</Project>
