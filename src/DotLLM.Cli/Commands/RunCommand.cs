@@ -11,6 +11,7 @@ using DotLLM.Models.Gguf;
 using DotLLM.Tokenizers;
 using DotLLM.Tokenizers.ChatTemplates;
 using DotLLM.Tokenizers.ToolCallParsers;
+using DotLLM.Server;
 using Spectre.Console;
 using Spectre.Console.Cli;
 using Spectre.Console.Rendering;
@@ -93,7 +94,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         public bool PCoreOnly { get; set; }
 
         [CommandOption("--device|-d")]
-        [Description("Compute device: 'cpu' (default), 'gpu', 'gpu:0', 'gpu:1'.")]
+        [Description("Compute device: 'cpu' (default), 'gpu' (auto), 'cuda', 'rocm', 'gpu:0'.")]
         [DefaultValue("cpu")]
         public string Device { get; set; } = "cpu";
 
@@ -196,23 +197,8 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             config = GgufModelConfigExtractor.Extract(gguf.Metadata);
             tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
 
-            int gpuLayers = ResolveGpuLayers(settings, config);
-            if (gpuLayers <= 0)
-            {
-                model = TransformerModel.LoadFromGguf(gguf, config,
-                    new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly));
-            }
-            else if (gpuLayers >= config.NumLayers)
-            {
-                int gpuId = ParseGpuId(settings.Device);
-                model = DotLLM.Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
-            }
-            else
-            {
-                int gpuId = ParseGpuId(settings.Device);
-                model = DotLLM.Cuda.HybridTransformerModel.LoadFromGguf(gguf, config, gpuLayers, gpuId,
-                    new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly));
-            }
+            var threading = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
+            model = ModelLoader.Load(gguf, config, settings.Device, settings.GpuLayers, threading);
         }
 
         var loadSw = Stopwatch.StartNew();
@@ -230,8 +216,8 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
         // Display VRAM warning after spinner completes (so it stays visible).
         // In JSON mode, write to stderr so it doesn't corrupt the JSON output.
-        string? vramWarning = (model as DotLLM.Cuda.CudaTransformerModel)?.VramWarning
-                           ?? (model as DotLLM.Cuda.HybridTransformerModel)?.VramWarning;
+        string? vramWarning = ModelLoader.GetVramWarning(model);
+
         if (vramWarning is not null)
         {
             if (settings.Json)

@@ -786,3 +786,36 @@ rocminfo | grep "gfx"
 - **GFX11 (RDNA 3) WMMA kernels**: `gfx1100` exposes `WMMA` (Wave Matrix Multiply Accumulate) instructions analogous to CUDA `wmma`. Custom attention kernels can exploit these directly for consumer AMD GPU acceleration when rocBLAS Matrix Cores are unavailable.
 - **FP8 support (MI300X / gfx942)**: CDNA 3 native FP8 (`__hip_fp8_e4m3_fnuz`) enables quantized prefill without dequant overhead. Requires ROCm 6.0+.
 - **NVRTC equivalent (hipRTC)**: AMD provides `hipRTC` (`libhiprtc.so`) for runtime compilation of `.hip` source to code objects — eliminates the `hipcc` build step entirely, enabling kernel updates without recompiling. API mirrors NVRTC.
+
+---
+
+## Device Management
+
+DotLLM automatically detects ROCm-capable devices. You can specify a device using:
+- `--device rocm`: Uses the first detected AMD GPU.
+- `--device rocm:0`: Explicitly use the first device.
+- `--device rocm:1`: Use the second device.
+
+## Hybrid CPU/GPU Execution
+
+DotLLM supports hybrid offloading for AMD ROCm, allowing you to split model layers between your GPU and CPU. This is particularly useful for:
+- Large models that don't fit entirely in VRAM.
+- Integrated GPUs (APUs) like the Ryzen 7950X, where sharing system RAM is more efficient when split.
+
+To enable hybrid mode, use the `--gpu-layers` flag with a value less than the total number of layers in the model:
+
+```bash
+# Offload 10 layers to AMD GPU, run the rest on CPU
+dotllm run llama3 --device rocm --gpu-layers 10
+```
+
+### Performance Considerations
+- **Boundary Transfer**: There is a small overhead when transferring the hidden state from GPU memory to CPU memory at the layer boundary. DotLLM uses `hipMemcpyDtoH` combined with high-performance SIMD FP16-to-FP32 conversion on the CPU to minimize this.
+- **iGPU vs dGPU**: On discrete GPUs (dGPU), the PCIe bus transfer can be a bottleneck for very small models. On APUs (iGPU), the transfer is often faster as they share physical memory, but the iGPU itself is slower.
+- **KV-Cache**: In hybrid mode, the KV-cache is also split. GPU layers use FP16 VRAM-resident caches, while CPU layers use FP32 RAM-resident caches.
+
+## Integrated GPU (APU) Support
+
+ROCm can run on integrated Radeon graphics found in Ryzen 7000/8000/9000 series processors. 
+- Ensure you have the latest ROCm-compatible drivers (AMD Software: Adrenalin Edition).
+- You may need to set `HSA_OVERRIDE_GFX_VERSION=11.0.0` (for RDNA 3 iGPUs) if the runtime doesn't recognize the device automatically.
