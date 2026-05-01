@@ -128,7 +128,11 @@ public class HipDecodeDebugTest
 
         int[] promptTokens = GgufBpeTokenizerFactory.Load(gguf.Metadata).Encode("The capital of France is");
         int[] positions = new int[promptTokens.Length];
-        for (int i = 0; i < positions.Length; i++) positions[i] = i;
+
+        for (int i = 0; i < positions.Length; i++)
+        {
+            positions[i] = i;
+        }
 
         string hsacoDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "native", "Hsaco"));
 
