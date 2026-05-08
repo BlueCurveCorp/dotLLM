@@ -6,6 +6,7 @@ using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Engine;
 using DotLLM.HuggingFace;
+using DotLLM.Models;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using DotLLM.Tokenizers.Bpe;
@@ -44,7 +45,7 @@ public class InferenceBenchmarks
     [ParamsAllValues]
     public BenchmarkModel Model { get; set; }
 
-    private GgufFile _gguf = null!;
+    private IModelContainer _container = null!;
     private IModel _model = null!;
     private BpeTokenizer _tokenizer = null!;
     private TextGenerator _generator = null!;
@@ -93,9 +94,9 @@ public class InferenceBenchmarks
         var promptPreview = _prompt.Length > 60 ? _prompt[..60] + "..." : _prompt;
         Console.WriteLine($"Prompt: \"{promptPreview}\", MaxTokens: {_maxTokens}");
 
-        _gguf = GgufFile.Open(_modelPath);
-        var config = GgufModelConfigExtractor.Extract(_gguf.Metadata);
-        _tokenizer = GgufBpeTokenizerFactory.Load(_gguf.Metadata);
+        _container = GgufModelContainer.Open(_modelPath);
+        var config = _container.Config;
+        _tokenizer = GgufBpeTokenizerFactory.Load(((GgufModelContainer)_container).Metadata);
 
         var envDevice = Environment.GetEnvironmentVariable("DOTLLM_BENCH_DEVICE") ?? "cpu";
         Func<ModelConfig, int, IKvCache>? kvFactory = null;
@@ -107,11 +108,11 @@ public class InferenceBenchmarks
             int gpuId = 0;
             if (envDevice.Contains(':'))
                 int.TryParse(envDevice.Split(':')[1], out gpuId);
-            kvFactory = LoadGpuModel(_gguf, config, gpuId);
+            kvFactory = LoadGpuModel(_container, config, gpuId);
         }
         else
         {
-            _model = TransformerModel.LoadFromGguf(_gguf, config, ThreadingConfig.Auto);
+            _model = TransformerModel.Load(_container, ThreadingConfig.Auto);
             Console.WriteLine($"Device: CPU ({ThreadingConfig.Auto.EffectiveThreadCount} threads)");
         }
 
@@ -124,11 +125,11 @@ public class InferenceBenchmarks
     /// when this method is actually called — not when <c>Setup()</c> is compiled.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private Func<ModelConfig, int, IKvCache> LoadGpuModel(GgufFile gguf, ModelConfig config, int gpuId)
+    private Func<ModelConfig, int, IKvCache> LoadGpuModel(IModelContainer container, ModelConfig config, int gpuId)
     {
         try
         {
-            var cudaModel = Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
+            var cudaModel = Cuda.CudaTransformerModel.Load(container, gpuId);
             _model = cudaModel;
 
             var device = Cuda.CudaDevice.GetDevice(gpuId);
@@ -197,7 +198,7 @@ public class InferenceBenchmarks
         }
 
         _model?.Dispose();
-        _gguf?.Dispose();
+        _container?.Dispose();
     }
 
     private static double Median(List<double> sorted)

@@ -2,9 +2,8 @@ using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Cpu.Kernels;
 using DotLLM.Cuda.Interop;
+using DotLLM.Models;
 using DotLLM.Models.Architectures;
-using DotLLM.Models.Gguf;
-
 namespace DotLLM.Cuda;
 
 /// <summary>
@@ -65,7 +64,7 @@ internal readonly struct CudaLayerWeights
 }
 
 /// <summary>
-/// Manages all model weights on GPU. Uploads from GGUF mmap, dequantizes to FP16 on device.
+/// Manages all model weights on GPU. Uploads from model container, dequantizes to FP16 on device.
 /// </summary>
 internal sealed class CudaWeights : IDisposable
 {
@@ -99,20 +98,21 @@ internal sealed class CudaWeights : IDisposable
     }
 
     /// <summary>
-    /// Uploads weights from CPU (GGUF mmap) to GPU. Quantized weights are
+    /// Uploads weights from CPU (container mmap) to GPU. Quantized weights are
     /// dequantized to FP16 on-device to avoid transferring the larger FP16 data over PCIe.
     /// </summary>
-    /// <param name="cpuWeights">CPU-side weights (mmap'd from GGUF).</param>
-    /// <param name="config">Model configuration.</param>
+    /// <param name="cpuWeights">CPU-side weights (mmap'd from container).</param>
+    /// <param name="container">Model container.</param>
     /// <param name="kernels">Loaded PTX kernels for dequantization.</param>
     /// <param name="stream">CUDA stream for async uploads.</param>
     /// <param name="numGpuLayers">Number of layers to upload. -1 = all layers.
     /// When less than total layers (hybrid mode), output norm and LM head are skipped
     /// since the CPU handles final projection.</param>
-    public static CudaWeights LoadFromGguf(TransformerWeights cpuWeights, ModelConfig config,
-                                              CudaKernels kernels, nint stream,
-                                              int numGpuLayers = -1)
+    public static CudaWeights Load(TransformerWeights cpuWeights, IModelContainer container,
+                                               CudaKernels kernels, nint stream,
+                                               int numGpuLayers = -1)
     {
+        var config = container.Config;
         int layerCount = numGpuLayers < 0
             ? config.NumLayers
             : Math.Min(numGpuLayers, config.NumLayers);

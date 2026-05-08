@@ -3,9 +3,8 @@ using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Core.Tensors;
 using DotLLM.RoCm.Interop;
+using DotLLM.Models;
 using DotLLM.Models.Architectures;
-using DotLLM.Models.Gguf;
-
 namespace DotLLM.RoCm;
 
 /// <summary>
@@ -20,7 +19,7 @@ public sealed class HipTransformerModel : IModel
     private readonly HipCublasHandle _cublas;
     private readonly HipContext _context;
     private readonly HipKernels _kernels;
-    private readonly GgufFile _gguf;
+    private readonly IModelContainer _container;
     private readonly int _deviceId;
     private readonly float _ropeTheta;
     private readonly int _ropeDim;
@@ -35,18 +34,19 @@ public sealed class HipTransformerModel : IModel
 
     private HipTransformerModel(ModelConfig config, HipWeights weights, HipForwardState state,
         HipStream stream, HipCublasHandle cublas, HipContext context, HipKernels kernels,
-        GgufFile gguf, int deviceId, float ropeTheta, int ropeDim, int ropeType, string? vramWarning)
+        IModelContainer container, int deviceId, float ropeTheta, int ropeDim, int ropeType, string? vramWarning)
     {
         Config = config; _weights = weights; _state = state; _stream = stream;
-        _cublas = cublas; _context = context; _kernels = kernels; _gguf = gguf;
+        _cublas = cublas; _context = context; _kernels = kernels; _container = container;
         _deviceId = deviceId; _ropeTheta = ropeTheta; _ropeDim = ropeDim;
         VramWarning = vramWarning; _ropeType = ropeType;
     }
 
  
-    public static HipTransformerModel LoadFromGguf(GgufFile gguf, ModelConfig config, int deviceId = 0, string? hsacoDir = null)
+    public static HipTransformerModel Load(IModelContainer container, int deviceId = 0, string? hsacoDir = null)
     {
-        var cpuWeights = TransformerWeights.LoadFromGguf(gguf, config);
+        var config = container.Config;
+        var cpuWeights = TransformerWeights.Load(container);
         var context = HipContext.Create(deviceId);
         var stream = HipStream.Create();
         var cublas = HipCublasHandle.Create();
@@ -55,13 +55,13 @@ public sealed class HipTransformerModel : IModel
         hsacoDir ??= Path.Combine(AppContext.BaseDirectory, "hsaco");
         var kernels = new HipKernels(hsacoDir);
 
+        // Check VRAM estimation
         long estimatedWeightBytes = 0;
-
-        foreach (var tensorValue in gguf.TensorsByName.Values)
+        foreach (var t in container.Tensors)
         {
-            int innerDim = tensorValue.Shape[0];
-            long outerDim = (long)tensorValue.Shape.ElementCount / innerDim;
-            estimatedWeightBytes += Cpu.Kernels.Dequantize.RowByteSize(innerDim, tensorValue.QuantizationType) * outerDim;
+            int innerDim = t.Shape[0];
+            long outerDim = (long)t.Shape.ElementCount / innerDim;
+            estimatedWeightBytes += Cpu.Kernels.Dequantize.RowByteSize(innerDim, t.QuantizationType) * outerDim;
         }
 
         string? vramWarning = null;
@@ -74,7 +74,7 @@ public sealed class HipTransformerModel : IModel
                           "Performance will be degraded. Consider a smaller model or quantization format.";
         }
 
-        var weights = HipWeights.LoadFromGguf(cpuWeights, config, kernels, stream.Handle);
+        var weights = HipWeights.Load(cpuWeights, container, kernels, stream.Handle);
         var state = new HipForwardState(config.HiddenSize, config.NumAttentionHeads, config.NumKvHeads,
             config.HeadDim, config.IntermediateSize, config.VocabSize);
 
@@ -88,23 +88,9 @@ public sealed class HipTransformerModel : IModel
         float ropeThetaVal = config.RoPEConfig?.Theta ?? 10000.0f;
         int ropeTypeVal = (int)(config.RoPEConfig?.Type ?? RoPEType.Norm);
 
-        return new HipTransformerModel(config, weights, state, stream, cublas, context,
-            kernels, gguf, deviceId, ropeThetaVal, ropeDimVal, ropeTypeVal, vramWarning);
+        return new HipTransformerModel(config, weights, state, stream, cublas, context, kernels, container, deviceId, ropeThetaVal, ropeDimVal, ropeTypeVal, vramWarning);
     }
 
-    /// <summary>
-    /// Loads the model from the same device memory that was used to load the weights.
-    /// </summary>
-    public static HipTransformerModel LoadFromGgufFast(GgufFile gguf, ModelConfig config,
-        int deviceId = 0, string? hsacoDir = null)
-    {
-        var hipModel = LoadFromGguf(gguf, config, deviceId, hsacoDir);
-
-        return new HipTransformerModel(hipModel.Config, hipModel._weights, hipModel._state,
-            hipModel._stream, hipModel._cublas, hipModel._context, hipModel._kernels,
-            hipModel._gguf, deviceId, hipModel._ropeTheta, hipModel._ropeDim,
-            hipModel._ropeType, hipModel.VramWarning);
-    }
 
     public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions, int deviceId)
         => Forward(tokenIds, positions, deviceId, kvCache: null);
@@ -336,5 +322,6 @@ public sealed class HipTransformerModel : IModel
         _cublas.Dispose();
         _stream.Dispose();
         _context.Dispose();
+        _container.Dispose();
     }
 }

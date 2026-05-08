@@ -18,10 +18,10 @@ string modelPath = args[0];
 string prompt = args.Length > 1 ? string.Join(' ', args.Skip(1)) : "The capital of France is";
 
 Console.WriteLine($"Loading model: {modelPath}");
-using var gguf = GgufFile.Open(modelPath);
-var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-using var model = TransformerModel.LoadFromGguf(gguf, config);
-var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+using var container = GgufModelContainer.Open(modelPath);
+using var model = TransformerModel.Load(container);
+var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
+var config = container.Config;
 
 Console.WriteLine($"Model: {config.Architecture}, {config.NumLayers} layers, {config.VocabSize} vocab");
 Console.WriteLine($"Prompt: \"{prompt}\"");

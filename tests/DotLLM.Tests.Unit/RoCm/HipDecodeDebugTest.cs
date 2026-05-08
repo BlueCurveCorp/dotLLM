@@ -5,6 +5,7 @@ using DotLLM.Core.Tensors;
 using DotLLM.RoCm;
 using DotLLM.RoCm.Interop;
 using DotLLM.Engine.KvCache;
+using DotLLM.Models;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using Xunit;
@@ -123,10 +124,10 @@ public class HipDecodeDebugTest
             ".dotllm", "models", "Qwen", "Qwen2.5-0.5B-Instruct-GGUF", "qwen2.5-0.5b-instruct-q8_0.gguf");
         Skip.If(!File.Exists(modelPath), "Qwen2.5-0.5B-Instruct Q8_0 GGUF not found");
 
-        var gguf = GgufFile.Open(modelPath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
+        using var container = GgufModelContainer.Open(modelPath);
+        var config = container.Config;
 
-        int[] promptTokens = GgufBpeTokenizerFactory.Load(gguf.Metadata).Encode("The capital of France is");
+        int[] promptTokens = GgufBpeTokenizerFactory.Load(container.Metadata).Encode("The capital of France is");
         int[] positions = new int[promptTokens.Length];
 
         for (int i = 0; i < positions.Length; i++)
@@ -137,26 +138,26 @@ public class HipDecodeDebugTest
         string hsacoDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "native", "Hsaco"));
 
         // Baseline: full GPU (NeoX RoPE + biases)
-        RunFeatureTest("Baseline (NeoX+bias)", gguf, config, promptTokens, positions, hsacoDir,
+        RunFeatureTest("Baseline (NeoX+bias)", container, config, promptTokens, positions, hsacoDir,
             ropeOverride: -1, skipBias: false);
         // Test 1: Force Norm RoPE (wrong results, but shows error contribution of RoPE type)
-        RunFeatureTest("Force Norm RoPE", gguf, config, promptTokens, positions, hsacoDir,
+        RunFeatureTest("Force Norm RoPE", container, config, promptTokens, positions, hsacoDir,
             ropeOverride: 0, skipBias: false);
         // Test 2: Skip biases (wrong results, but shows error contribution of biases)
-        RunFeatureTest("Skip biases", gguf, config, promptTokens, positions, hsacoDir,
+        RunFeatureTest("Skip biases", container, config, promptTokens, positions, hsacoDir,
             ropeOverride: -1, skipBias: true);
         // Test 3: Both disabled
-        RunFeatureTest("Norm RoPE + no bias", gguf, config, promptTokens, positions, hsacoDir,
+        RunFeatureTest("Norm RoPE + no bias", container, config, promptTokens, positions, hsacoDir,
             ropeOverride: 0, skipBias: true);
     }
 
-    private unsafe void RunFeatureTest(string label, GgufFile gguf, ModelConfig config,
+    private unsafe void RunFeatureTest(string label, IModelContainer container, ModelConfig config,
         int[] promptTokens, int[] positions, string hsacoDir, int ropeOverride, bool skipBias)
     {
-        var cpuModel = TransformerModel.LoadFromGguf(gguf, config);
+        var cpuModel = TransformerModel.Load(container);
         cpuModel.DebugMaxLayers = 1;
 
-        var gpuModel = HipTransformerModel.LoadFromGguf(gguf, config, 0, hsacoDir);
+        var gpuModel = HipTransformerModel.Load(container, 0, hsacoDir);
         gpuModel.DebugMaxLayers = 1;
         gpuModel.DebugRopeTypeOverride = ropeOverride;
         gpuModel.DebugSkipBias = skipBias;
@@ -175,9 +176,9 @@ public class HipDecodeDebugTest
 
     private unsafe void RunLayerBisect(string modelPath, string prompt)
     {
-        var gguf = GgufFile.Open(modelPath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+        using var container = GgufModelContainer.Open(modelPath);
+        var config = container.Config;
+        var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
 
         _out.WriteLine($"Model: {Path.GetFileName(modelPath)}");
         _out.WriteLine($"Config: {config.Architecture} {config.NumLayers}L/{config.HiddenSize}H " +
@@ -195,9 +196,10 @@ public class HipDecodeDebugTest
         {
             if (maxLayers > config.NumLayers) break;
 
-            var cpuModel = TransformerModel.LoadFromGguf(gguf, config);
+            var cpuModel = TransformerModel.Load(container);
             cpuModel.DebugMaxLayers = maxLayers;
-            var gpuModel = HipTransformerModel.LoadFromGguf(gguf, config, 0, hsacoDir);
+            string hsacoDir2 = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "native", "Hsaco"));
+            var gpuModel = HipTransformerModel.Load(container, 0, hsacoDir2);
             gpuModel.DebugMaxLayers = maxLayers;
 
             using var cpuLogits = cpuModel.Forward(promptTokens, positions, -1);
@@ -219,9 +221,9 @@ public class HipDecodeDebugTest
 
     private unsafe void RunDecodeComparison(string modelPath, string prompt, int decodeSteps)
     {
-        var gguf = GgufFile.Open(modelPath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+        using var container = GgufModelContainer.Open(modelPath);
+        var config = container.Config;
+        var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
 
         _out.WriteLine($"Model: {Path.GetFileName(modelPath)}");
         _out.WriteLine($"Config: {config.Architecture} {config.NumLayers}L/{config.HiddenSize}H " +
@@ -229,12 +231,12 @@ public class HipDecodeDebugTest
         _out.WriteLine($"RoPE: type={config.RoPEConfig?.Type} dim={config.RoPEConfig?.DimensionCount} theta={config.RoPEConfig?.Theta}");
 
         // CPU model
-        var cpuModel = TransformerModel.LoadFromGguf(gguf, config);
+        var cpuModel = TransformerModel.Load(container);
         var cpuKv = new SimpleKvCache(config.NumLayers, config.NumKvHeads, config.HeadDim, 64);
 
         // GPU model
         string hsacoDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "native", "Hsaco"));
-        var gpuModel = HipTransformerModel.LoadFromGguf(gguf, config, 0, hsacoDir);
+        var gpuModel = HipTransformerModel.Load(container, 0, hsacoDir);
         var gpuKv = gpuModel.CreateKvCache(64);
 
         int[] promptTokens = tokenizer.Encode(prompt);

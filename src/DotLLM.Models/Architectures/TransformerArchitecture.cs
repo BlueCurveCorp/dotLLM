@@ -10,16 +10,16 @@ namespace DotLLM.Models.Architectures;
 /// </summary>
 public sealed class TransformerArchitecture : IModelArchitecture
 {
-    private readonly GgufFile _gguf;
+    private readonly IModelContainer _container;
 
     /// <summary>
-    /// Creates a new transformer architecture factory bound to the given GGUF file.
-    /// The <paramref name="gguf"/> must remain alive for the lifetime of any model created by this factory.
+    /// Creates a new transformer architecture factory bound to the given model container.
+    /// The <paramref name="container"/> must remain alive for the lifetime of any model created by this factory.
     /// </summary>
-    /// <param name="gguf">An opened GGUF file containing transformer weights.</param>
-    public TransformerArchitecture(GgufFile gguf)
+    /// <param name="container">An opened model container containing transformer weights.</param>
+    public TransformerArchitecture(IModelContainer container)
     {
-        _gguf = gguf ?? throw new ArgumentNullException(nameof(gguf));
+        _container = container ?? throw new ArgumentNullException(nameof(container));
     }
 
     /// <inheritdoc/>
@@ -39,6 +39,6 @@ public sealed class TransformerArchitecture : IModelArchitecture
             throw new ArgumentException(
                 $"TransformerArchitecture does not support {config.Architecture}.", nameof(config));
 
-        return TransformerModel.LoadFromGguf(_gguf, config);
+        return TransformerModel.Load(_container);
     }
 }

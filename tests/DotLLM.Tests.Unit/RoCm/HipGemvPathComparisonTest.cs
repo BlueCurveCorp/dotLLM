@@ -54,9 +54,9 @@ public class HipGemvPathComparisonTest
             ".dotllm", "models", "QuantFactory", "SmolLM-135M-GGUF", "SmolLM-135M.Q8_0.gguf");
         Skip.If(!File.Exists(modelPath), "SmolLM-135M Q8_0 GGUF not found");
 
-        var gguf = GgufFile.Open(modelPath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var cpuWeights = TransformerWeights.LoadFromGguf(gguf, config);
+        using var container = GgufModelContainer.Open(modelPath);
+        var config = container.Config;
+        var cpuWeights = TransformerWeights.Load(container);
 
         ref readonly var lw = ref cpuWeights.Layers[0];
         _out.WriteLine($"Layer 0 Q: quant={lw.QQuantType}, output={lw.QOutputDim}, input={lw.QInputDim}");
@@ -136,9 +136,9 @@ public class HipGemvPathComparisonTest
             ".dotllm", "models", "QuantFactory", "SmolLM-135M-GGUF", "SmolLM-135M.Q8_0.gguf");
         Skip.If(!File.Exists(modelPath), "SmolLM-135M Q8_0 GGUF not found");
 
-        var gguf = GgufFile.Open(modelPath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var cpuWeights = TransformerWeights.LoadFromGguf(gguf, config);
+        using var container = GgufModelContainer.Open(modelPath);
+        var config = container.Config;
+        var cpuWeights = TransformerWeights.Load(container);
 
         using var ctx = HipContext.Create(0);
         using var stream = HipStream.Create();

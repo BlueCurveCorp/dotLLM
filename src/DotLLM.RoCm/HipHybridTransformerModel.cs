@@ -10,11 +10,10 @@ using DotLLM.Core.Models;
 using DotLLM.Core.Tensors;
 using DotLLM.Cpu.Kernels;
 using DotLLM.Cpu.Threading;
+using DotLLM.Models;
 using DotLLM.RoCm.Interop;
 using DotLLM.Engine.KvCache;
 using DotLLM.Models.Architectures;
-using DotLLM.Models.Gguf;
-
 namespace DotLLM.RoCm;
 
 /// <summary>
@@ -41,7 +40,7 @@ public sealed unsafe class HipHybridTransformerModel : IModel
     private readonly bool _ownsThreadPool;
 
     // ── Shared ──
-    private readonly GgufFile _gguf;
+    private readonly IModelContainer _container;
     private readonly int _numGpuLayers;
     private readonly int _deviceId;
     private readonly float _ropeTheta;
@@ -71,7 +70,7 @@ public sealed unsafe class HipHybridTransformerModel : IModel
         ModelConfig config, HipWeights gpuWeights, HipForwardState gpuState,
         HipStream stream, HipCublasHandle cublas, HipContext context,
         HipKernels kernels, TransformerWeights cpuWeights, TransformerForwardState cpuState,
-        ComputeThreadPool? threadPool, bool ownsPool, GgufFile gguf,
+        ComputeThreadPool? threadPool, bool ownsPool, IModelContainer container,
         int numGpuLayers, int deviceId, float ropeTheta, int ropeDim,
         int gpuRopeType, RoPEType cpuRopeType, int? slidingWindowSize,
         string? vramWarning)
@@ -87,7 +86,7 @@ public sealed unsafe class HipHybridTransformerModel : IModel
         _cpuState = cpuState;
         _threadPool = threadPool;
         _ownsThreadPool = ownsPool;
-        _gguf = gguf;
+        _container = container;
         _numGpuLayers = numGpuLayers;
         _deviceId = deviceId;
         _ropeTheta = ropeTheta;
@@ -103,15 +102,14 @@ public sealed unsafe class HipHybridTransformerModel : IModel
             (nuint)(_fp16TransferCapacity * sizeof(ushort)), 64);
     }
 
-    public static HipHybridTransformerModel LoadFromGguf(
-        GgufFile gguf, ModelConfig config, int numGpuLayers,
-        int deviceId, ThreadingConfig threading)
+    public static HipHybridTransformerModel Load(IModelContainer container,
+        int gpuLayers, int deviceId, ThreadingConfig threading)
     {
-        if (numGpuLayers <= 0 || numGpuLayers >= config.NumLayers)
-            throw new ArgumentOutOfRangeException(nameof(numGpuLayers),
-                $"numGpuLayers must be between 1 and {config.NumLayers - 1} for hybrid mode.");
+        var config = container.Config;
+        if (gpuLayers <= 0 || gpuLayers >= config.NumLayers)
+            throw new ArgumentOutOfRangeException(nameof(gpuLayers));
 
-        var cpuWeights = TransformerWeights.LoadFromGguf(gguf, config);
+        var cpuWeights = TransformerWeights.Load(container);
         cpuWeights.RepackWeights();
 
         var context = HipContext.Create(deviceId);
@@ -122,18 +120,26 @@ public sealed unsafe class HipHybridTransformerModel : IModel
         string? hsacoDir = Path.Combine(AppContext.BaseDirectory, "hsaco");
         var kernels = new HipKernels(hsacoDir);
 
-        var gpuWeights = HipWeights.LoadFromGguf(cpuWeights, config, kernels, stream.Handle, numGpuLayers);
+        long estimatedGpuBytes = 0;
+        foreach (var t in container.Tensors)
+        {
+            if (IsGpuTensor(t.Name, gpuLayers))
+            {
+                int innerDim = t.Shape[0];
+                long outerDim = (long)t.Shape.ElementCount / innerDim;
+                estimatedGpuBytes += Dequantize.RowByteSize(innerDim, t.QuantizationType) * outerDim;
+            }
+        }
+
+        var gpuWeights = HipWeights.Load(cpuWeights, container, kernels, stream.Handle, gpuLayers);
 
         string? vramWarning = null;
         if (HipApi.hipMemGetInfo(out nuint freeAfter, out nuint totalVram) == 0 && totalVram > 0)
         {
-            double freePercent = (double)freeAfter / totalVram;
-            if (freePercent < 0.10)
+            if (estimatedGpuBytes > (long)freeAfter)
             {
-                long freeMb = (long)freeAfter / (1024 * 1024);
-                long totalMb = (long)totalVram / (1024 * 1024);
-                vramWarning = $"VRAM nearly full after loading {numGpuLayers}/{config.NumLayers} layers " +
-                              $"({freeMb}/{totalMb} MB free). Consider reducing --gpu-layers.";
+                vramWarning = $"Estimated VRAM requirements ({estimatedGpuBytes / 1024 / 1024} MB) " +
+                              $"exceed free VRAM ({freeAfter / 1024 / 1024} MB).";
             }
         }
 
@@ -161,9 +167,19 @@ public sealed unsafe class HipHybridTransformerModel : IModel
 
         return new HipHybridTransformerModel(
             config, gpuWeights, gpuState, stream, cublas, context, kernels,
-            cpuWeights, cpuState, pool, ownsPool: pool is not null, gguf,
-            numGpuLayers, deviceId, ropeTheta, ropeDim, gpuRopeType, cpuRopeType,
+            cpuWeights, cpuState, pool, ownsPool: pool is not null, container,
+            gpuLayers, deviceId, ropeTheta, ropeDim, gpuRopeType, cpuRopeType,
             config.SlidingWindowSize, vramWarning);
+    }
+
+    private static bool IsGpuTensor(string name, int numGpuLayers)
+    {
+        if (name.StartsWith("layers."))
+        {
+            int layerIdx = int.Parse(name.Split('.')[1]);
+            return layerIdx < numGpuLayers;
+        }
+        return name.StartsWith("tok_embeddings") || name.StartsWith("norm");
     }
 
     public HipHybridKvCache CreateKvCache(int maxSeqLen)
@@ -457,15 +473,15 @@ public sealed unsafe class HipHybridTransformerModel : IModel
             var rwLm = _cpuWeights.RepackedOutput ?? default;
             GemmInterleaved(lmWeights, lmQt, finalNormOut, logits, vocabSize, hiddenSize, seqLen, preQuantFinal, in rwLm);
 
-        var shape = new TensorShape(seqLen, vocabSize);
-        var result = UnmanagedTensor.Allocate(shape, DType.Float32, deviceId: -1);
-        new Span<float>(logits, seqLen * vocabSize).CopyTo(
-            new Span<float>((void*)result.DataPointer, seqLen * vocabSize));
+            var shape = new TensorShape(seqLen, vocabSize);
+            var result = UnmanagedTensor.Allocate(shape, DType.Float32, deviceId: -1);
+            new Span<float>(logits, seqLen * vocabSize).CopyTo(
+                new Span<float>((void*)result.DataPointer, seqLen * vocabSize));
 
-        return result;
-    }
+            return result;
+        }
 
-    return UnmanagedTensor.Allocate(new TensorShape(seqLen, hiddenSize), DType.Float32, deviceId: -1); // fallback/hidden return
+        return UnmanagedTensor.Allocate(new TensorShape(seqLen, hiddenSize), DType.Float32, deviceId: -1); // fallback/hidden return
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -613,6 +629,7 @@ public sealed unsafe class HipHybridTransformerModel : IModel
     public void Dispose()
     {
         _gpuState.Dispose(); _gpuWeights.Dispose(); _kernels.Dispose(); _cublas.Dispose(); _stream.Dispose(); _context.Dispose();
+        _container.Dispose();
         if (_ownsThreadPool) _threadPool?.Dispose();
         _cpuState.Dispose(); _cpuWeights.Dispose();
         if (_fp16TransferBuffer != 0) { NativeMemory.AlignedFree((void*)_fp16TransferBuffer); _fp16TransferBuffer = 0; }

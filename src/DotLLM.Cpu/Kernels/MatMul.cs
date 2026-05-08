@@ -80,6 +80,70 @@ public static unsafe partial class MatMul
     }
 
     /// <summary>
+    /// BF16 GEMV: A is BF16 [M,K], x is f32 [K].
+    /// </summary>
+    [SkipLocalsInit]
+    public static void GemvBf16(ushort* a, float* x, float* result, int m, int k)
+    {
+        if (Avx2.IsSupported)
+        {
+            GemvBf16Avx2(a, x, result, m, k);
+        }
+        else
+        {
+            GemvBf16Scalar(a, x, result, m, k);
+        }
+    }
+
+    [SkipLocalsInit]
+    internal static void GemvBf16Scalar(ushort* a, float* x, float* result, int m, int k)
+    {
+        for (int row = 0; row < m; row++)
+        {
+            float sum = 0;
+            ushort* rowPtr = a + row * k;
+            for (int j = 0; j < k; j++)
+            {
+                uint bits = (uint)rowPtr[j] << 16;
+                sum += BitConverter.Int32BitsToSingle((int)bits) * x[j];
+            }
+            result[row] = sum;
+        }
+    }
+
+    [SkipLocalsInit]
+    internal static void GemvBf16Avx2(ushort* a, float* x, float* result, int m, int k)
+    {
+        for (int row = 0; row < m; row++)
+        {
+            Vector256<float> acc = Vector256<float>.Zero;
+            ushort* rowPtr = a + row * k;
+            int j = 0;
+            for (; j + 7 < k; j += 8)
+            {
+                Vector128<ushort> v16 = Unsafe.ReadUnaligned<Vector128<ushort>>(rowPtr + j);
+                Vector256<uint> v32 = Avx2.ConvertToVector256Int32(v16).AsUInt32();
+                Vector256<uint> shifted = Avx2.ShiftLeftLogical(v32, 16);
+                Vector256<float> vf = shifted.AsSingle();
+
+                Vector256<float> vx = Unsafe.ReadUnaligned<Vector256<float>>(x + j);
+                
+                if (Fma.IsSupported)
+                    acc = Fma.MultiplyAdd(vf, vx, acc);
+                else
+                    acc += vf * vx;
+            }
+            float sum = HorizontalSumAvx2Float(acc);
+            for (; j < k; j++)
+            {
+                uint bits = (uint)rowPtr[j] << 16;
+                sum += BitConverter.Int32BitsToSingle((int)bits) * x[j];
+            }
+            result[row] = sum;
+        }
+    }
+
+    /// <summary>
     /// Q8_0 GEMV: A is Q8_0 [M,K], x is f32 [K].
     /// Quantizes x to Q8_0 on-the-fly, then uses Q8_0×Q8_0 VecDot per row.
     /// </summary>

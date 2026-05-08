@@ -23,20 +23,19 @@ public class LlamaForwardPassTests
         _fixture = fixture;
     }
 
-    private (TransformerModel model, GgufFile gguf, BpeTokenizer tokenizer) LoadModel()
+    private (TransformerModel model, GgufModelContainer container, BpeTokenizer tokenizer) LoadModel()
     {
-        var gguf = GgufFile.Open(_fixture.FilePath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var model = TransformerModel.LoadFromGguf(gguf, config);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
-        return (model, gguf, tokenizer);
+        var container = GgufModelContainer.Open(_fixture.FilePath);
+        var model = TransformerModel.Load(container);
+        var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
+        return (model, container, tokenizer);
     }
 
     [Fact]
     public void SingleToken_ProducesVocabSizedLogits()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int bosId = tokenizer.BosTokenId;
@@ -50,8 +49,8 @@ public class LlamaForwardPassTests
     [Fact]
     public void SingleToken_LogitsAreFinite()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int bosId = tokenizer.BosTokenId;
@@ -71,8 +70,8 @@ public class LlamaForwardPassTests
     [Fact]
     public void SameInput_ProducesSameOutput()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int bosId = tokenizer.BosTokenId;
@@ -96,8 +95,8 @@ public class LlamaForwardPassTests
     [Fact]
     public void MultipleTokens_ProducesCorrectShape()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int[] tokenIds = tokenizer.Encode("Hello");
@@ -117,8 +116,8 @@ public class LlamaForwardPassTests
     [Fact]
     public void GreedyDecode_ProducesCoherentTokens()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         // Encode prompt
@@ -179,8 +178,8 @@ public class LlamaForwardPassTests
     [Fact]
     public void GreedyDecode_PredictsParis()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int[] tokenIds = tokenizer.Encode("The capital of France is");
@@ -205,8 +204,8 @@ public class LlamaForwardPassTests
     [Fact]
     public void Forward_WithKvCache_PrefillMatchesUncached()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int[] tokenIds = tokenizer.Encode("The capital of France is");
@@ -239,8 +238,8 @@ public class LlamaForwardPassTests
     [Fact]
     public void GreedyDecode_WithKvCache_ProducesSameTokens()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int[] promptIds = tokenizer.Encode("The capital of France is");
@@ -323,8 +322,8 @@ public class LlamaForwardPassTests
     [Fact]
     public void GreedyDecode_WithKvCache_MatchesExpectedOutput()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int[] promptIds = tokenizer.Encode("The capital of France is");

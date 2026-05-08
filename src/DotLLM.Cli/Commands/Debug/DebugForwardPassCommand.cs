@@ -2,6 +2,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using DotLLM.Cli.Commands;
+using DotLLM.Models;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using Spectre.Console;
@@ -32,10 +33,10 @@ internal sealed class DebugForwardPassCommand : Command<DebugForwardPassCommand.
         if (resolvedPath is null)
             return 1;
 
-        using var gguf = GgufFile.Open(resolvedPath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
-        using var model = TransformerModel.LoadFromGguf(gguf, config);
+        using var container = GgufModelContainer.Open(resolvedPath);
+        var config = container.Config;
+        var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
+        using var model = TransformerModel.Load(container);
 
         // Model config summary
         AnsiConsole.Write(new Rule("[bold yellow]Model Config[/]").LeftJustified());
@@ -51,10 +52,10 @@ internal sealed class DebugForwardPassCommand : Command<DebugForwardPassCommand.
         configTable.AddRow("KV heads", config.NumKvHeads.ToString());
         configTable.AddRow("Vocab size", config.VocabSize.ToString("N0"));
 
-        // Find embedding quant type from GGUF tensors
-        if (gguf.TensorsByName.TryGetValue("token_embd.weight", out var embDesc))
+        // Find embedding quant type from container tensors
+        if (container.TryGetTensor("token_embd.weight", out var embDesc))
             configTable.AddRow("Embedding quant", embDesc.QuantizationType.ToString());
-        if (gguf.TensorsByName.TryGetValue("output.weight", out var outDesc))
+        if (container.TryGetTensor("output.weight", out var outDesc))
             configTable.AddRow("Output quant", outDesc.QuantizationType.ToString());
 
         configTable.AddRow("Head dim", config.HeadDim.ToString());
@@ -78,7 +79,7 @@ internal sealed class DebugForwardPassCommand : Command<DebugForwardPassCommand.
         };
         foreach (var tensorName in tensorNames)
         {
-            if (gguf.TensorsByName.TryGetValue(tensorName, out var tdesc))
+            if (container.TryGetTensor(tensorName, out var tdesc))
                 AnsiConsole.WriteLine($"  {tensorName}: {tdesc.Shape} {tdesc.QuantizationType}");
         }
         AnsiConsole.WriteLine();

@@ -1,6 +1,7 @@
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Cpu.Kernels;
+using DotLLM.Models;
 using DotLLM.Models.Architectures;
 using DotLLM.RoCm.Interop;
 
@@ -84,9 +85,11 @@ internal sealed class HipWeights : IDisposable
         _allAllocations = allocs;
     }
 
-    public static HipWeights LoadFromGguf(TransformerWeights cpuWeights, ModelConfig config,
-                                            HipKernels kernels, nint stream, int numGpuLayers = -1)
+    public static HipWeights Load(TransformerWeights cpuWeights, IModelContainer container,
+                                              HipKernels kernels, nint stream,
+                                              int numGpuLayers = -1)
     {
+        var config = container.Config;
         int layerCount = numGpuLayers < 0 ? config.NumLayers : Math.Min(numGpuLayers, config.NumLayers);
         bool isHybrid = layerCount < config.NumLayers;
         var allocs = new List<nint>();

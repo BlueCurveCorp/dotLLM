@@ -23,20 +23,19 @@ public class TextGeneratorTests
         _fixture = fixture;
     }
 
-    private (TransformerModel model, GgufFile gguf, BpeTokenizer tokenizer) LoadModel()
+    private (TransformerModel model, GgufModelContainer container, BpeTokenizer tokenizer) LoadModel()
     {
-        var gguf = GgufFile.Open(_fixture.FilePath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var model = TransformerModel.LoadFromGguf(gguf, config);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
-        return (model, gguf, tokenizer);
+        var container = GgufModelContainer.Open(_fixture.FilePath);
+        var model = TransformerModel.Load(container);
+        var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
+        return (model, container, tokenizer);
     }
 
     [Fact]
     public void GreedyGeneration_ProducesNonEmptyOutput()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -52,8 +51,8 @@ public class TextGeneratorTests
     [Fact]
     public void GreedyGeneration_PredictsParis()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -70,8 +69,8 @@ public class TextGeneratorTests
     [Fact]
     public void SeededSampling_IsDeterministic()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var options = new InferenceOptions { Temperature = 0.8f, Seed = 42, MaxTokens = 10 };
@@ -89,8 +88,8 @@ public class TextGeneratorTests
     [Fact]
     public void MaxTokens_StopsAtLimit()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -105,8 +104,8 @@ public class TextGeneratorTests
     [Fact]
     public void EosStop_ReportsCorrectFinishReason()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -124,8 +123,8 @@ public class TextGeneratorTests
     [Fact]
     public void Timings_ArePopulatedAfterGeneration()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -165,8 +164,8 @@ public class TextGeneratorTests
     [Fact]
     public void OnTokenGenerated_CallbackIsInvoked()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -184,8 +183,8 @@ public class TextGeneratorTests
     [Fact]
     public async Task StreamingOutput_MatchesSynchronousOutput()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -205,8 +204,8 @@ public class TextGeneratorTests
     [Fact]
     public async Task StreamingTokens_HaveCorrectFinishReasonAndTimings()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -235,8 +234,8 @@ public class TextGeneratorTests
     [Fact]
     public async Task StreamingGeneration_CancellationStopsCleanly()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -268,8 +267,8 @@ public class TextGeneratorTests
     [Fact]
     public async Task StreamingGeneration_StopSequenceTerminatesStream()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);

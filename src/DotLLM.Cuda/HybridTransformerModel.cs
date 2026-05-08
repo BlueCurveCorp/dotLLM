@@ -11,9 +11,8 @@ using DotLLM.Cpu.Kernels;
 using DotLLM.Cpu.Threading;
 using DotLLM.Cuda.Interop;
 using DotLLM.Engine.KvCache;
+using DotLLM.Models;
 using DotLLM.Models.Architectures;
-using DotLLM.Models.Gguf;
-
 namespace DotLLM.Cuda;
 
 /// <summary>
@@ -44,7 +43,7 @@ public sealed unsafe class HybridTransformerModel : IModel
     private readonly bool _ownsThreadPool;
 
     // ── Shared ──
-    private readonly GgufFile _gguf;
+    private readonly IModelContainer _container;
     private readonly int _numGpuLayers;
     private readonly int _deviceId;
     private readonly float _ropeTheta;
@@ -74,7 +73,7 @@ public sealed unsafe class HybridTransformerModel : IModel
         ModelConfig config, CudaWeights gpuWeights, CudaForwardState gpuState,
         CudaStream stream, CudaCublasHandle cublas, CudaContext context,
         CudaKernels kernels, TransformerWeights cpuWeights, TransformerForwardState cpuState,
-        ComputeThreadPool? threadPool, bool ownsPool, GgufFile gguf,
+        ComputeThreadPool? threadPool, bool ownsPool, IModelContainer container,
         int numGpuLayers, int deviceId, float ropeTheta, int ropeDim,
         int gpuRopeType, RoPEType cpuRopeType, int? slidingWindowSize,
         string? vramWarning)
@@ -90,7 +89,7 @@ public sealed unsafe class HybridTransformerModel : IModel
         _cpuState = cpuState;
         _threadPool = threadPool;
         _ownsThreadPool = ownsPool;
-        _gguf = gguf;
+        _container = container;
         _numGpuLayers = numGpuLayers;
         _deviceId = deviceId;
         _ropeTheta = ropeTheta;
@@ -107,24 +106,24 @@ public sealed unsafe class HybridTransformerModel : IModel
     }
 
     /// <summary>
-    /// Loads a hybrid transformer model from an opened GGUF file.
+    /// Loads a hybrid CPU/GPU model from a model container.
     /// </summary>
-    /// <param name="gguf">Opened GGUF file (must remain alive for model lifetime).</param>
-    /// <param name="config">Model configuration extracted from GGUF metadata.</param>
-    /// <param name="numGpuLayers">Number of layers to run on GPU (must be &gt; 0 and &lt; config.NumLayers).</param>
-    /// <param name="deviceId">GPU device ordinal (0-based).</param>
-    /// <param name="threading">CPU threading configuration for CPU-side layers.</param>
-    public static HybridTransformerModel LoadFromGguf(
-        GgufFile gguf, ModelConfig config, int numGpuLayers,
-        int deviceId, ThreadingConfig threading)
+    /// <param name="container">Opened model container.</param>
+    /// <param name="gpuLayers">Number of layers to offload to GPU.</param>
+    /// <param name="deviceId">GPU device ordinal.</param>
+    /// <param name="threading">Threading config for CPU-side layers.</param>
+    public static HybridTransformerModel Load(IModelContainer container,
+                                                 int gpuLayers, int deviceId = 0,
+                                                 ThreadingConfig threading = default)
     {
-        if (numGpuLayers <= 0 || numGpuLayers >= config.NumLayers)
-            throw new ArgumentOutOfRangeException(nameof(numGpuLayers),
-                $"numGpuLayers must be between 1 and {config.NumLayers - 1} for hybrid mode. " +
+        var config = container.Config;
+        if (gpuLayers <= 0 || gpuLayers >= config.NumLayers)
+            throw new ArgumentOutOfRangeException(nameof(gpuLayers),
+                $"gpuLayers must be between 1 and {config.NumLayers - 1} for hybrid mode. " +
                 $"Use TransformerModel for pure CPU or CudaTransformerModel for pure GPU.");
 
-        // 1. Load CPU weights (mmap references only)
-        var cpuWeights = TransformerWeights.LoadFromGguf(gguf, config);
+        // 1. Load CPU weights
+        var cpuWeights = TransformerWeights.Load(container);
         cpuWeights.RepackWeights();
 
         // 2. Initialize CUDA
@@ -137,20 +136,19 @@ public sealed unsafe class HybridTransformerModel : IModel
         var kernels = new CudaKernels(ptxDir);
 
         // 3. Upload only GPU layers to VRAM
-        var gpuWeights = CudaWeights.LoadFromGguf(cpuWeights, config, kernels, stream.Handle, numGpuLayers);
+        var gpuWeights = CudaWeights.Load(cpuWeights, container, kernels, stream.Handle, gpuLayers);
 
         // 4. VRAM estimation and warning
         string? vramWarning = null;
         if (CudaDriverApi.cuMemGetInfo_v2(out nuint freeAfter, out nuint totalVram) == 0
             && totalVram > 0)
         {
-            // Rough check: if less than 10% free after loading, warn
             double freePercent = (double)freeAfter / totalVram;
             if (freePercent < 0.10)
             {
                 long freeMb = (long)freeAfter / (1024 * 1024);
                 long totalMb = (long)totalVram / (1024 * 1024);
-                vramWarning = $"VRAM nearly full after loading {numGpuLayers}/{config.NumLayers} layers " +
+                vramWarning = $"VRAM nearly full after loading {gpuLayers}/{config.NumLayers} layers " +
                               $"({freeMb}/{totalMb} MB free). Consider reducing --gpu-layers.";
             }
         }
@@ -192,8 +190,8 @@ public sealed unsafe class HybridTransformerModel : IModel
 
         return new HybridTransformerModel(
             config, gpuWeights, gpuState, stream, cublas, context, kernels,
-            cpuWeights, cpuState, pool, ownsPool: pool is not null, gguf,
-            numGpuLayers, deviceId, ropeTheta, ropeDim, gpuRopeType, cpuRopeType,
+            cpuWeights, cpuState, pool, ownsPool: pool is not null, container,
+            gpuLayers, deviceId, ropeTheta, ropeDim, gpuRopeType, cpuRopeType,
             config.SlidingWindowSize, vramWarning);
     }
 
@@ -1002,6 +1000,7 @@ public sealed unsafe class HybridTransformerModel : IModel
         _cublas.Dispose();
         _stream.Dispose();
         _context.Dispose();
+        _container.Dispose();
 
         if (_ownsThreadPool)
             _threadPool?.Dispose();

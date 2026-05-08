@@ -6,6 +6,8 @@ using DotLLM.Cli.Helpers;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Engine;
+using DotLLM.Engine.PromptCache;
+using DotLLM.Models;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using DotLLM.Tokenizers;
@@ -186,19 +188,19 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         if (resolvedPath is null)
             return 1;
 
-        GgufFile gguf = null!;
+        IModelContainer container = null!;
         ModelConfig config = null!;
         Tokenizers.Bpe.BpeTokenizer tokenizer = null!;
         IModel model = null!;
 
         void LoadModel()
         {
-            gguf = GgufFile.Open(resolvedPath);
-            config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-            tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+            container = DotLLM.Server.ModelLoader.OpenContainer(resolvedPath);
+            config = container.Config;
+            tokenizer = TokenizerFactory.Load(container, resolvedPath);
 
             var threading = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
-            model = ModelLoader.Load(gguf, config, settings.Device, settings.GpuLayers, threading);
+            model = DotLLM.Server.ModelLoader.Load(container, settings.Device, settings.GpuLayers, threading);
         }
 
         var loadSw = Stopwatch.StartNew();
@@ -216,7 +218,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
         // Display VRAM warning after spinner completes (so it stays visible).
         // In JSON mode, write to stderr so it doesn't corrupt the JSON output.
-        string? vramWarning = ModelLoader.GetVramWarning(model);
+        string? vramWarning = DotLLM.Server.ModelLoader.GetVramWarning(model);
 
         if (vramWarning is not null)
         {
@@ -236,8 +238,8 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         {
             string bosToken = tokenizer.DecodeToken(tokenizer.BosTokenId);
             string eosToken = tokenizer.DecodeToken(tokenizer.EosTokenId);
-            var chatTemplate = GgufChatTemplateFactory.TryCreate(gguf.Metadata, tokenizer)
-                ?? new JinjaChatTemplate(ChatCommand.DefaultChatMlTemplateText, bosToken, eosToken);
+            var jinjaTemplate = ChatTemplateFactory.TryCreate(container, tokenizer, resolvedPath);
+            var chatTemplate = jinjaTemplate ?? new JinjaChatTemplate(ChatCommand.DefaultChatMlTemplateText, bosToken, eosToken);
 
             var messages = new List<ChatMessage>
             {
@@ -248,7 +250,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 AddGenerationPrompt = true,
                 Tools = tools
             });
-            toolCallParser = GgufChatTemplateFactory.CreateToolCallParser(gguf.Metadata, config.Architecture);
+            toolCallParser = container is GgufModelContainer gmc2 ? GgufChatTemplateFactory.CreateToolCallParser(gmc2.Metadata, config.Architecture) : GgufChatTemplateFactory.CreateToolCallParser(config);
         }
 
         // Build inference options from CLI flags
@@ -291,6 +293,8 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         }
 
         DotLLM.Engine.KvCache.PagedKvCacheFactory? pagedFactory = null;
+        IModel? draftModel = null;
+        IModelContainer? draftContainer = null;
         try
         {
             // Add stop sequences for tool calling end-of-turn tokens
@@ -350,8 +354,6 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             }
 
             // Load speculative draft model if requested
-            IModel? draftModel = null;
-            GgufFile? draftGguf = null;
             if (!string.IsNullOrEmpty(settings.SpeculativeModel))
             {
                 var draftPath = GgufFileResolver.Resolve(settings.SpeculativeModel, null);
@@ -364,20 +366,16 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                     return 1;
                 }
 
-                draftGguf = GgufFile.Open(draftPath);
-                var draftConfig = GgufModelConfigExtractor.Extract(draftGguf.Metadata);
+                draftContainer = GgufModelContainer.Open(draftPath);
+                var draftConfig = draftContainer!.Config;
                 if (!DotLLM.Engine.SpeculativeConstants.AreVocabsCompatible(config.VocabSize, draftConfig.VocabSize))
                 {
                     var msg = $"Draft model vocab size ({draftConfig.VocabSize}) differs from target ({config.VocabSize}) by more than {DotLLM.Engine.SpeculativeConstants.MaxVocabSizeDifference} tokens.";
-                    if (!settings.Json)
-                        AnsiConsole.MarkupLine($"[red]{Markup.Escape(msg)}[/]");
-                    else
-                        Console.Error.WriteLine($"Error: {msg}");
+                    AnsiConsole.MarkupLine($"[red]Error: {msg}[/]");
                     return 1;
                 }
 
-                draftModel = TransformerModel.LoadFromGguf(draftGguf, draftConfig,
-                    new ThreadingConfig(settings.Threads, settings.DecodeThreads));
+                draftModel = TransformerModel.Load(draftContainer!, new ThreadingConfig(settings.Threads, settings.DecodeThreads));
 
                 if (!settings.Json)
                     AnsiConsole.MarkupLine($"[dim]Speculative decoding: K={settings.SpeculativeK}, draft={System.IO.Path.GetFileName(draftPath)}[/]");
@@ -426,7 +424,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
             // Memory metrics
             long fileSize = new FileInfo(resolvedPath).Length;
-            long modelWeightsBytes = fileSize - gguf.DataSectionOffset;
+            long modelWeightsBytes = fileSize - container.DataSectionOffset;
             long computeBytes = model.ComputeMemoryBytes;
             int cacheSize = Math.Min(promptLen + settings.MaxTokens, config.MaxSequenceLength);
             // Use actual KV-cache bytes from engine timings (reflects quantization compression).
@@ -560,8 +558,9 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         finally
         {
             pagedFactory?.Dispose();
-            model.Dispose();
-            gguf.Dispose();
+            draftContainer?.Dispose();
+            model?.Dispose();
+            container?.Dispose();
         }
 
         return 0;

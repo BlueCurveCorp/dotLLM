@@ -23,20 +23,19 @@ public class QwenTextGeneratorTests
         _fixture = fixture;
     }
 
-    private (TransformerModel model, GgufFile gguf, BpeTokenizer tokenizer) LoadModel()
+    private (TransformerModel model, GgufModelContainer container, BpeTokenizer tokenizer) LoadModel()
     {
-        var gguf = GgufFile.Open(_fixture.FilePath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var model = TransformerModel.LoadFromGguf(gguf, config);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
-        return (model, gguf, tokenizer);
+        var container = GgufModelContainer.Open(_fixture.FilePath);
+        var model = TransformerModel.Load(container);
+        var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
+        return (model, container, tokenizer);
     }
 
     [Fact]
     public void GreedyGeneration_ProducesNonEmptyOutput()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -51,8 +50,8 @@ public class QwenTextGeneratorTests
     [Fact]
     public void GreedyGeneration_PredictsParis()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -69,8 +68,8 @@ public class QwenTextGeneratorTests
     [Fact]
     public void Timings_ArePopulated()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -92,8 +91,8 @@ public class QwenTextGeneratorTests
     [Fact]
     public async Task StreamingOutput_MatchesSynchronousOutput()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);

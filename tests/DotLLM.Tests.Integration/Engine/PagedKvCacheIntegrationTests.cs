@@ -26,20 +26,19 @@ public class PagedKvCacheIntegrationTests
         _fixture = fixture;
     }
 
-    private (TransformerModel model, GgufFile gguf, BpeTokenizer tokenizer, ModelConfig config) LoadModel()
+    private (TransformerModel model, GgufModelContainer container, BpeTokenizer tokenizer, ModelConfig config) LoadModel()
     {
-        var gguf = GgufFile.Open(_fixture.FilePath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var model = TransformerModel.LoadFromGguf(gguf, config);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
-        return (model, gguf, tokenizer, config);
+        var container = GgufModelContainer.Open(_fixture.FilePath);
+        var model = TransformerModel.Load(container);
+        var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
+        return (model, container, tokenizer, container.Config);
     }
 
     [Fact]
     public void PagedKvCache_MatchesSimpleKvCache_GreedyOutput()
     {
-        var (model, gguf, tokenizer, config) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer, config) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var options = new InferenceOptions { Temperature = 0f, MaxTokens = 10 };
@@ -62,8 +61,8 @@ public class PagedKvCacheIntegrationTests
     [Fact]
     public void PagedKvCache_WithPrefixCache_ReusesCacheOnSecondCall()
     {
-        var (model, gguf, tokenizer, config) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer, config) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         using var pagedFactory = new PagedKvCacheFactory(
@@ -93,8 +92,8 @@ public class PagedKvCacheIntegrationTests
     [Fact]
     public async Task PagedKvCache_StreamingMatchesSynchronous()
     {
-        var (model, gguf, tokenizer, config) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer, config) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         using var pagedFactory = new PagedKvCacheFactory(

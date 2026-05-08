@@ -3,6 +3,7 @@ using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Core.Tensors;
 using DotLLM.Cuda.Interop;
+using DotLLM.Models;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 
@@ -21,7 +22,7 @@ public sealed unsafe class CudaTransformerModel : IModel
     private readonly CudaCublasHandle _cublas;
     private readonly CudaContext _context;
     private readonly CudaKernels _kernels;
-    private readonly GgufFile _gguf;
+    private readonly IModelContainer _container;
     private readonly int _deviceId;
     private readonly float _ropeTheta;
     private readonly int _ropeDim;
@@ -48,7 +49,7 @@ public sealed unsafe class CudaTransformerModel : IModel
     private CudaTransformerModel(
         ModelConfig config, CudaWeights weights, CudaForwardState state,
         CudaStream stream, CudaCublasHandle cublas, CudaContext context,
-        CudaKernels kernels, GgufFile gguf, int deviceId,
+        CudaKernels kernels, IModelContainer container, int deviceId,
         float ropeTheta, int ropeDim, int ropeType, string? vramWarning)
     {
         Config = config;
@@ -58,7 +59,7 @@ public sealed unsafe class CudaTransformerModel : IModel
         _cublas = cublas;
         _context = context;
         _kernels = kernels;
-        _gguf = gguf;
+        _container = container;
         _deviceId = deviceId;
         _ropeTheta = ropeTheta;
         _ropeDim = ropeDim;
@@ -67,17 +68,17 @@ public sealed unsafe class CudaTransformerModel : IModel
     }
 
     /// <summary>
-    /// Loads a transformer model onto the GPU from an opened GGUF file.
+    /// Loads a transformer model onto the GPU from a model container.
     /// </summary>
-    /// <param name="gguf">Opened GGUF file (must remain alive for model lifetime).</param>
-    /// <param name="config">Model configuration extracted from GGUF metadata.</param>
+    /// <param name="container">Opened model container (must remain alive for model lifetime).</param>
     /// <param name="deviceId">GPU device ordinal (0-based).</param>
     /// <param name="ptxDir">Directory containing compiled PTX files. If null, auto-detects from assembly location.</param>
-    public static CudaTransformerModel LoadFromGguf(GgufFile gguf, ModelConfig config,
-                                                       int deviceId = 0, string? ptxDir = null)
+    public static CudaTransformerModel Load(IModelContainer container,
+                                               int deviceId = 0, string? ptxDir = null)
     {
+        var config = container.Config;
         // Load CPU weights (mmap references only, no heavy allocation)
-        var cpuWeights = TransformerWeights.LoadFromGguf(gguf, config);
+        var cpuWeights = TransformerWeights.Load(container);
 
         // Initialize CUDA
         var context = CudaContext.Create(deviceId);
@@ -90,9 +91,9 @@ public sealed unsafe class CudaTransformerModel : IModel
         var kernels = new CudaKernels(ptxDir);
 
         // Check VRAM before loading — warn if model likely exceeds available memory.
-        // Estimate: sum of quantized byte sizes for all GGUF tensors.
+        // Estimate: sum of quantized byte sizes for all tensors in container.
         long estimatedWeightBytes = 0;
-        foreach (var t in gguf.TensorsByName.Values)
+        foreach (var t in container.Tensors)
         {
             int innerDim = t.Shape[0];
             long outerDim = (long)t.Shape.ElementCount / innerDim;
@@ -112,7 +113,7 @@ public sealed unsafe class CudaTransformerModel : IModel
         }
 
         // Upload weights to GPU
-        var weights = CudaWeights.LoadFromGguf(cpuWeights, config, kernels, stream.Handle);
+        var weights = CudaWeights.Load(cpuWeights, container, kernels, stream.Handle);
 
         // Create scratch buffers
         var state = new CudaForwardState(
@@ -125,7 +126,7 @@ public sealed unsafe class CudaTransformerModel : IModel
         int ropeType = (int)(config.RoPEConfig?.Type ?? RoPEType.Norm);
 
         return new CudaTransformerModel(config, weights, state, stream, cublas, context,
-            kernels, gguf, deviceId, ropeTheta, ropeDim, ropeType, vramWarning);
+            kernels, container, deviceId, ropeTheta, ropeDim, ropeType, vramWarning);
     }
 
     /// <inheritdoc/>
@@ -380,5 +381,6 @@ public sealed unsafe class CudaTransformerModel : IModel
         _cublas.Dispose();
         _stream.Dispose();
         _context.Dispose();
+        _container.Dispose();
     }
 }

@@ -33,5 +33,8 @@ public enum QuantizationType
     Q5_K = 13,
 
     /// <summary>6-bit K-quant, super-block of 256.</summary>
-    Q6_K = 14
+    Q6_K = 14,
+
+    /// <summary>16-bit brain float.</summary>
+    BF16 = 30
 }
