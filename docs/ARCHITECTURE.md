@@ -21,7 +21,7 @@
 ├─────────────────────────────────────────────────────────────────┤
 │  DotLLM.Models                     DotLLM.Tokenizers            │
 │  ├── GGUF loader (mmap)            ├── BPE (tiktoken-style)     │
-│  ├── SafeTensors loader            ├── SentencePiece            │
+│  ├── SafeTensors loader & Repackager ├── SentencePiece            │
 │  ├── LlamaModel                    ├── HuggingFace tokenizer    │
 │  ├── MistralModel                  └── Chat template engine     │
 │  ├── PhiModel, QwenModel                                        │
@@ -74,10 +74,11 @@ GGUF file on disk
        ├─ Tensor descriptors ──→ (name, shape, quantization type, offset)
        │
        └─ Memory-mapped region ──→ OS demand-pages from disk
-            │                       No managed heap allocation
+            │                       No managed heap allocation (unless repackaged)
             │
             ├─ CPU tensors: raw pointer via SafeMemoryMappedViewHandle
-            └─ GPU tensors: cudaMemcpy from mmap'd host → device memory
+            ├─ Quantized Repackaging: (SafeTensors AWQ/GPTQ → Q4_K/Q4_0 blocks)
+            └─ GPU tensors: cudaMemcpy from mmap'd host/repackaged buffer → device memory
 ```
 
 ## Data Flow: Inference Request

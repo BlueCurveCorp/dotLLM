@@ -12,6 +12,7 @@ public sealed class SafeTensorsModelContainer : IModelContainer
     private readonly ModelConfig _config;
     private readonly IReadOnlyList<SafeTensorsShard> _shards;
     private readonly Dictionary<string, ModelTensor> _tensorsByName;
+    private readonly List<nint> _repackagedBuffers = new();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SafeTensorsModelContainer"/> class.
@@ -24,15 +25,18 @@ public sealed class SafeTensorsModelContainer : IModelContainer
         _shards = shards;
 
         _tensorsByName = new Dictionary<string, ModelTensor>(StringComparer.Ordinal);
+        var rawTensors = new Dictionary<string, ModelTensor>(StringComparer.Ordinal);
+        
         foreach (var shard in _shards)
         {
             foreach (var kvp in shard.TensorsByName)
             {
-                // Map HuggingFace names to DotLLM standard names
-                string mappedName = SafeTensorsNameMapper.MapToDotLlmName(kvp.Key);
-                _tensorsByName[mappedName] = kvp.Value;
+                rawTensors[kvp.Key] = kvp.Value;
             }
         }
+
+        // Repackage AWQ/GPTQ and map normal tensors
+        SafeTensorsRepackager.Repackage(rawTensors, _tensorsByName, _repackagedBuffers);
     }
 
     /// <summary>
@@ -123,11 +127,20 @@ public sealed class SafeTensorsModelContainer : IModelContainer
     }
 
     /// <inheritdoc/>
-    public void Dispose()
+    public unsafe void Dispose()
     {
         foreach (var shard in _shards)
         {
             shard.Dispose();
         }
+
+        foreach (var ptr in _repackagedBuffers)
+        {
+            if (ptr != nint.Zero)
+            {
+                System.Runtime.InteropServices.NativeMemory.AlignedFree((void*)ptr);
+            }
+        }
+        _repackagedBuffers.Clear();
     }
 }

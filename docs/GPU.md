@@ -2,7 +2,7 @@
 
 ## Overview
 
-dotLLM supports GPU-accelerated inference on NVIDIA GPUs via the CUDA backend (`DotLLM.Cuda`). All transformer operations — embedding lookup, attention, FFN, normalization — execute entirely on the GPU with FP16 precision. The CPU is only involved for tokenization, sampling, and orchestrating kernel launches.
+dotLLM supports GPU-accelerated inference on NVIDIA GPUs via the CUDA backend (`DotLLM.Cuda`). All transformer operations — embedding lookup, attention, FFN, normalization — execute entirely on the GPU with FP16 and native BF16 precision. The CPU is only involved for tokenization, sampling, and orchestrating kernel launches.
 
 GPU inference targets **10–50× prefill speedup** and **3–10× decode speedup** over the CPU backend.
 
@@ -137,10 +137,10 @@ The GPU forward pass mirrors the CPU path in `TransformerModel.Forward()` but al
 10. Return UnmanagedTensor to sampling pipeline
 ```
 
-### Why FP16?
+### Why FP16 / BF16?
 
-- cuBLAS FP16 GEMM uses Tensor Cores (Volta+) → ~2× throughput vs FP32
-- FP16 activations = half the memory bandwidth → faster decode (bandwidth-bound)
+- cuBLAS FP16/BF16 GEMM uses Tensor Cores (Volta+) → ~2× throughput vs FP32
+- FP16/BF16 activations = half the memory bandwidth → faster decode (bandwidth-bound)
 - On pre-Volta GPUs (Pascal): cuBLAS FP16 GEMM falls back to CUDA cores at ~FP32 speed — still correct, just no Tensor Core speedup
 - Numerical difference vs CPU (FP32) is minimal: top-k token predictions match
 
