@@ -23,31 +23,28 @@ public class QwenForwardPassTests
         _fixture = fixture;
     }
 
-    private (TransformerModel model, GgufFile gguf, BpeTokenizer tokenizer) LoadModel()
+    private (TransformerModel model, GgufModelContainer container, BpeTokenizer tokenizer) LoadModel()
     {
-        var gguf = GgufFile.Open(_fixture.FilePath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var model = TransformerModel.LoadFromGguf(gguf, config);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
-        return (model, gguf, tokenizer);
+        var container = GgufModelContainer.Open(_fixture.FilePath);
+        var model = TransformerModel.Load(container);
+        var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
+        return (model, container, tokenizer);
     }
 
     [Fact]
     public void Config_DetectsQwenArchitecture()
     {
-        using var gguf = GgufFile.Open(_fixture.FilePath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-
-        Assert.Equal(Architecture.Qwen, config.Architecture);
+        using var container = GgufModelContainer.Open(_fixture.FilePath);
+        Assert.Equal(Architecture.Qwen, container.Config.Architecture);
     }
 
     [Fact]
     public void Config_HasTiedEmbeddings()
     {
-        using var gguf = GgufFile.Open(_fixture.FilePath);
+        using var container = GgufModelContainer.Open(_fixture.FilePath);
 
         // Qwen2 models typically have tied embeddings — no output.weight tensor
-        bool hasOutputWeight = gguf.TensorsByName.ContainsKey("output.weight");
+        bool hasOutputWeight = container.TryGetTensor("output.weight", out _);
         if (!hasOutputWeight)
         {
             // When output.weight is absent, the model uses tied embeddings
@@ -59,20 +56,20 @@ public class QwenForwardPassTests
     [Fact]
     public void Config_HasQKBiases()
     {
-        using var gguf = GgufFile.Open(_fixture.FilePath);
+        using var container = GgufModelContainer.Open(_fixture.FilePath);
 
         // Qwen2 has biases on Q and K (but not V)
-        Assert.True(gguf.TensorsByName.ContainsKey("blk.0.attn_q.bias"),
+        Assert.True(container.TryGetTensor("blk.0.attn_q.bias", out _),
             "Qwen2 should have Q bias");
-        Assert.True(gguf.TensorsByName.ContainsKey("blk.0.attn_k.bias"),
+        Assert.True(container.TryGetTensor("blk.0.attn_k.bias", out _),
             "Qwen2 should have K bias");
     }
 
     [Fact]
     public void SingleToken_ProducesVocabSizedLogits()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int bosId = tokenizer.BosTokenId;
@@ -86,8 +83,8 @@ public class QwenForwardPassTests
     [Fact]
     public void SingleToken_LogitsAreFinite()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int bosId = tokenizer.BosTokenId;
@@ -107,8 +104,8 @@ public class QwenForwardPassTests
     [Fact]
     public void SameInput_ProducesSameOutput()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int bosId = tokenizer.BosTokenId;
@@ -132,8 +129,8 @@ public class QwenForwardPassTests
     [Fact]
     public void Forward_WithKvCache_PrefillMatchesUncached()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int[] tokenIds = tokenizer.Encode("The capital of France is");
@@ -166,8 +163,8 @@ public class QwenForwardPassTests
     [Fact]
     public void GreedyDecode_PredictsParis()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         // Qwen2.5-0.5B-Instruct is an instruct model — it may emit a special/whitespace

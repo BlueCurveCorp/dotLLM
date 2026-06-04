@@ -1014,4 +1014,93 @@ public sealed unsafe class MatMulTests
                 ((sbyte*)(block + 2))[i] = (sbyte)rng.Next(-127, 128);
         }
     }
+
+    // ──────────────────── BF16 GEMV ────────────────────
+
+    /// <summary>Converts a float to its BF16 representation (upper 16 bits of IEEE 754).</summary>
+    private static ushort FloatToBf16(float f)
+        => (ushort)(BitConverter.SingleToInt32Bits(f) >> 16);
+
+    [Fact]
+    public void GemvBf16Scalar_2x2_KnownValues()
+    {
+        // A = [[1, 2], [3, 4]] as BF16, x = [5, 6]
+        // result = [17, 39]
+        ushort[] a = [FloatToBf16(1f), FloatToBf16(2f), FloatToBf16(3f), FloatToBf16(4f)];
+        float[] x = [5f, 6f];
+        float[] result = new float[2];
+
+        fixed (ushort* ap = a)
+        fixed (float* xp = x, rp = result)
+            MatMul.GemvBf16Scalar(ap, xp, rp, 2, 2);
+
+        Assert.Equal(17f, result[0], 0.1f);
+        Assert.Equal(39f, result[1], 0.1f);
+    }
+
+    [Fact]
+    public void GemvBf16Scalar_ZeroVector_ReturnsZeros()
+    {
+        ushort[] a = [FloatToBf16(1f), FloatToBf16(2f), FloatToBf16(3f), FloatToBf16(4f)];
+        float[] x = [0f, 0f];
+        float[] result = new float[2];
+
+        fixed (ushort* ap = a)
+        fixed (float* xp = x, rp = result)
+            MatMul.GemvBf16Scalar(ap, xp, rp, 2, 2);
+
+        Assert.Equal(0f, result[0]);
+        Assert.Equal(0f, result[1]);
+    }
+
+    [Fact]
+    public void GemvBf16_Avx2MatchesScalar()
+    {
+        if (!Avx2.IsSupported)
+            return;
+
+        var rng = new Random(42);
+        const int m = 16, k = 64;
+        ushort[] a = new ushort[m * k];
+        float[] x = new float[k];
+        for (int i = 0; i < a.Length; i++) a[i] = FloatToBf16(rng.NextSingle() * 2f - 1f);
+        for (int i = 0; i < k; i++) x[i] = rng.NextSingle() * 2f - 1f;
+
+        float[] scalarResult = new float[m];
+        float[] avx2Result = new float[m];
+
+        fixed (ushort* ap = a)
+        fixed (float* xp = x, sr = scalarResult, ir = avx2Result)
+        {
+            MatMul.GemvBf16Scalar(ap, xp, sr, m, k);
+            MatMul.GemvBf16Avx2(ap, xp, ir, m, k);
+        }
+
+        for (int i = 0; i < m; i++)
+            Assert.Equal(scalarResult[i], avx2Result[i], 1e-2f);
+    }
+
+    [Fact]
+    public void GemvBf16_DispatchMatchesScalar()
+    {
+        var rng = new Random(99);
+        const int m = 32, k = 128;
+        ushort[] a = new ushort[m * k];
+        float[] x = new float[k];
+        for (int i = 0; i < a.Length; i++) a[i] = FloatToBf16(rng.NextSingle() * 2f - 1f);
+        for (int i = 0; i < k; i++) x[i] = rng.NextSingle() * 2f - 1f;
+
+        float[] scalarResult = new float[m];
+        float[] dispatchResult = new float[m];
+
+        fixed (ushort* ap = a)
+        fixed (float* xp = x, sr = scalarResult, dr = dispatchResult)
+        {
+            MatMul.GemvBf16Scalar(ap, xp, sr, m, k);
+            MatMul.GemvBf16(ap, xp, dr, m, k);
+        }
+
+        for (int i = 0; i < m; i++)
+            Assert.Equal(scalarResult[i], dispatchResult[i], 1e-2f);
+    }
 }

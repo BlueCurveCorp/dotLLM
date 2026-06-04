@@ -4,6 +4,7 @@ using DotLLM.Core.Models;
 using DotLLM.Engine;
 using DotLLM.Engine.KvCache;
 using DotLLM.Engine.PromptCache;
+using DotLLM.Models;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using DotLLM.Tokenizers;
@@ -60,24 +61,21 @@ public static class ServerStartup
         IsReady = false,
     };
 
-    /// <summary>
-    /// Loads a model from the given GGUF path and returns a fully populated <see cref="ServerState"/>.
-    /// </summary>
     public static ServerState LoadModel(string resolvedPath, ServerOptions options)
     {
         Console.WriteLine($"[dotllm] Loading model from {resolvedPath}...");
-        var gguf = GgufFile.Open(resolvedPath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+        var container = ModelLoader.OpenContainer(resolvedPath);
+        var config = container.Config;
+        var tokenizer = TokenizerFactory.Load(container, resolvedPath);
 
         var threading = new ThreadingConfig(options.Threads, options.DecodeThreads);
 
-        IModel model = ModelLoader.Load(gguf, config, options.Device, options.GpuLayers, threading);
+        IModel model = ModelLoader.Load(container, options.Device, options.GpuLayers, threading);
 
         // Create chat template
         string bosToken = tokenizer.DecodeToken(tokenizer.BosTokenId);
         string eosToken = tokenizer.DecodeToken(tokenizer.EosTokenId);
-        IChatTemplate chatTemplate = GgufChatTemplateFactory.TryCreate(gguf.Metadata, tokenizer)
+        IChatTemplate chatTemplate = ChatTemplateFactory.TryCreate(container, tokenizer, resolvedPath)
             ?? new JinjaChatTemplate(
                 "{% for message in messages %}" +
                 "{{'<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n'}}" +
@@ -86,7 +84,7 @@ public static class ServerStartup
                 bosToken, eosToken);
 
         // Tool call parser
-        var toolCallParser = GgufChatTemplateFactory.CreateToolCallParser(gguf.Metadata, config.Architecture);
+        var toolCallParser = ChatTemplateFactory.CreateToolCallParser(container);
 
         // KV-cache configuration
         var kvConfig = new KvCacheConfig(
@@ -148,19 +146,19 @@ public static class ServerStartup
 
         // Load speculative draft model if configured
         IModel? draftModel = null;
-        GgufFile? draftGguf = null;
         string draftModelPath = "";
+        IModelContainer? draftContainer = null;
         if (!string.IsNullOrEmpty(options.SpeculativeModel))
         {
             var draftPath = ResolveModelPath(options.SpeculativeModel, null);
             if (draftPath is null)
                 throw new InvalidOperationException($"Speculative draft model not found: {options.SpeculativeModel}");
 
-            draftGguf = GgufFile.Open(draftPath);
-            var draftConfig = GgufModelConfigExtractor.Extract(draftGguf.Metadata);
+            draftContainer = ModelLoader.OpenContainer(draftPath);
+            var draftConfig = draftContainer.Config;
             if (!SpeculativeConstants.AreVocabsCompatible(config.VocabSize, draftConfig.VocabSize))
             {
-                draftGguf.Dispose();
+                draftContainer!.Dispose();
                 throw new InvalidOperationException(
                     $"Draft model vocab size ({draftConfig.VocabSize}) differs from target ({config.VocabSize}) " +
                     $"by more than {SpeculativeConstants.MaxVocabSizeDifference} tokens. " +
@@ -170,7 +168,7 @@ public static class ServerStartup
                 Console.WriteLine($"[dotllm] Note: vocab sizes differ slightly ({draftConfig.VocabSize} vs {config.VocabSize}) — using shared range for speculative comparison.");
 
             var draftThreading = new ThreadingConfig(options.Threads, options.DecodeThreads);
-            draftModel = TransformerModel.LoadFromGguf(draftGguf, draftConfig, draftThreading);
+            draftModel = TransformerModel.Load(draftContainer!, draftThreading);
             draftModelPath = draftPath;
             Console.WriteLine($"[dotllm] Speculative decoding: draft={Path.GetFileName(draftPath)}, K={options.SpeculativeCandidates}");
         }
@@ -191,16 +189,16 @@ public static class ServerStartup
             KvCacheFactory = kvFactory,
             PagedFactory = pagedFactory,
             PrefixCache = prefixCache,
+            Container = container,
             IsReady = true,
             Model = model,
             Tokenizer = tokenizer,
             ChatTemplate = chatTemplate,
             Generator = generator,
             LoadedModelPath = resolvedPath,
-            CurrentGguf = gguf,
             DraftModel = draftModel,
             DraftModelPath = draftModelPath,
-            DraftGguf = draftGguf,
+            DraftContainer = draftContainer,
         };
     }
 

@@ -17,20 +17,19 @@ public sealed class WarmupRunnerTests
 
     public WarmupRunnerTests(SmallModelFixture fixture) => _fixture = fixture;
 
-    private (TransformerModel model, GgufFile gguf, DotLLM.Tokenizers.Bpe.BpeTokenizer tokenizer) LoadModel()
+    private (TransformerModel model, GgufModelContainer container, DotLLM.Tokenizers.Bpe.BpeTokenizer tokenizer) LoadModel()
     {
-        var gguf = GgufFile.Open(_fixture.FilePath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var model = TransformerModel.LoadFromGguf(gguf, config);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
-        return (model, gguf, tokenizer);
+        var container = GgufModelContainer.Open(_fixture.FilePath);
+        var model = TransformerModel.Load(container);
+        var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
+        return (model, container, tokenizer);
     }
 
     [Fact]
     public void Run_CompletesSuccessfully()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -42,8 +41,8 @@ public sealed class WarmupRunnerTests
     [Fact]
     public void Run_WithDisabledOptions_SkipsWarmup()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);

@@ -30,16 +30,24 @@ public class HipKernelComparisonTests : IDisposable
     public HipKernelComparisonTests(ITestOutputHelper output)
     {
         _output = output;
-        if (!HipDevice.IsAvailable()) return;
+        try
+        {
+            if (!HipDevice.IsAvailable()) return;
 
-        _ctx = HipContext.Create(0);
-        _stream = HipStream.Create();
+            _ctx = HipContext.Create(0);
+            _stream = HipStream.Create();
 
-        string? hsacoDir = FindhsacoDir();
-        if (hsacoDir != null)
-            _kernels = new HipKernels(hsacoDir);
+            string? hsacoDir = FindhsacoDir();
+            if (hsacoDir != null)
+                _kernels = new HipKernels(hsacoDir);
 
-        _available = _kernels != null;
+            _available = _kernels != null;
+        }
+        catch (Exception ex)
+        {
+            _output.WriteLine($"Hardware initialization failed: {ex.Message}");
+            _available = false;
+        }
     }
 
     private static string? FindhsacoDir()

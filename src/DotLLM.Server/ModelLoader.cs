@@ -2,7 +2,9 @@ using System.Diagnostics;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Cpu.Threading;
+using DotLLM.Models;
 using DotLLM.Models.Gguf;
+using DotLLM.Models.SafeTensors;
 using DotLLM.Models.Architectures;
 
 namespace DotLLM.Server;
@@ -13,19 +15,34 @@ namespace DotLLM.Server;
 /// </summary>
 public static class ModelLoader
 {
+    /// <summary>
+    /// Opens the appropriate model container based on the provided path or directory.
+    /// </summary>
+    public static IModelContainer OpenContainer(string path)
+    {
+        if (Directory.Exists(path) || path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
+        {
+            return SafeTensorsModelContainer.Open(path);
+        }
+        else
+        {
+            return GgufModelContainer.Open(path);
+        }
+    }
+
     public static IModel Load(
-        GgufFile gguf,
-        ModelConfig config,
+        IModelContainer container,
         string device,
         int? gpuLayers,
         ThreadingConfig threading)
     {
+        var config = container.Config;
         int totalLayers = config.NumLayers;
         int resolvedGpuLayers = ResolveGpuLayers(device, gpuLayers, totalLayers);
 
         if (resolvedGpuLayers <= 0)
         {
-            return TransformerModel.LoadFromGguf(gguf, config, threading);
+            return TransformerModel.Load(container, threading);
         }
 
         int gpuId = ParseGpuId(device);
@@ -33,11 +50,11 @@ public static class ModelLoader
 
         if (backend == "cuda")
         {
-            return LoadCuda(gguf, config, resolvedGpuLayers, gpuId, threading);
+            return LoadCuda(container, resolvedGpuLayers, gpuId, threading);
         }
         else if (backend == "rocm")
         {
-            return LoadRoCm(gguf, config, resolvedGpuLayers, gpuId, threading);
+            return LoadRoCm(container, resolvedGpuLayers, gpuId, threading);
         }
         else
         {
@@ -75,22 +92,26 @@ public static class ModelLoader
         return 0;
     }
 
-    private static IModel LoadCuda(GgufFile gguf, ModelConfig config, int gpuLayers, int gpuId, ThreadingConfig threading)
+    private static IModel LoadCuda(IModelContainer container, int gpuLayers, int gpuId, ThreadingConfig threading)
     {
+        var config = container.Config;
         if (gpuLayers >= config.NumLayers)
         {
-            return DotLLM.Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
+            return DotLLM.Cuda.CudaTransformerModel.Load(container, gpuId);
         }
-        return DotLLM.Cuda.HybridTransformerModel.LoadFromGguf(gguf, config, gpuLayers, gpuId, threading);
+        return DotLLM.Cuda.HybridTransformerModel.Load(container, gpuLayers, gpuId, threading);
     }
 
-    private static IModel LoadRoCm(GgufFile gguf, ModelConfig config, int gpuLayers, int gpuId, ThreadingConfig threading)
+    private static IModel LoadRoCm(IModelContainer container, int gpuLayers, int gpuId, ThreadingConfig threading)
     {
+        var config = container.Config;
         if (gpuLayers >= config.NumLayers)
         {
-            return DotLLM.RoCm.HipTransformerModel.LoadFromGguf(gguf, config, gpuId);
+            // Note: HipTransformerModel refactoring pending, for now this will cause build error
+            // which I'll fix in next step.
+            return DotLLM.RoCm.HipTransformerModel.Load(container, gpuId);
         }
-        return DotLLM.RoCm.HipHybridTransformerModel.LoadFromGguf(gguf, config, gpuLayers, gpuId, threading);
+        return DotLLM.RoCm.HipHybridTransformerModel.Load(container, gpuLayers, gpuId, threading);
     }
 
     public static string? GetVramWarning(IModel model)

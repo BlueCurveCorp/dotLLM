@@ -7,7 +7,7 @@
 3. **Q4_0** — Basic 4-bit
 4. **Q4_K_M** — Most popular, best quality/size tradeoff
 5. **Q5_K_M, Q6_K** — Higher quality K-quants
-6. **GPTQ/AWQ** — GPU-native (future)
+6. **GPTQ/AWQ** — Supported via load-time repackager into `Q4_0`/`Q4_K` layout blocks
 
 ## Block Layouts
 

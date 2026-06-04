@@ -303,7 +303,7 @@ internal static partial class CublasApi
         nint beta,
         nint C, int Ctype, int ldc,
         int computeType, int algo);
-    // cudaDataType: CUDA_R_16F=2, CUDA_R_32F=0
+    // cudaDataType: CUDA_R_16F=2, CUDA_R_32F=0, CUDA_R_16BF=14
     // cublasComputeType: CUBLAS_COMPUTE_16F=64, CUBLAS_COMPUTE_32F=68
 }
 ```

@@ -37,6 +37,7 @@ public static unsafe partial class Dequantize
     {
         QuantizationType.F32 => elementCount * 4,
         QuantizationType.F16 => elementCount * 2,
+        QuantizationType.BF16 => elementCount * 2,
         QuantizationType.Q4_0 => elementCount / Q8_0GroupSize * Q4_0BlockBytes,
         QuantizationType.Q8_0 => elementCount / Q8_0GroupSize * Q8_0BlockBytes,
         QuantizationType.Q5_0 => elementCount / Q5_0GroupSize * Q5_0BlockBytes,
@@ -69,6 +70,9 @@ public static unsafe partial class Dequantize
                 break;
             case QuantizationType.F16:
                 DequantizeFp16(src, elementCount, dest);
+                break;
+            case QuantizationType.BF16:
+                DequantizeBf16(src, elementCount, dest);
                 break;
             case QuantizationType.Q8_0:
                 DequantizeQ8_0(src, elementCount, dest);
@@ -103,6 +107,20 @@ public static unsafe partial class Dequantize
         TensorPrimitives.ConvertToSingle(
             new ReadOnlySpan<Half>((void*)src, (int)elementCount),
             dest);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void DequantizeBf16(nint src, long elementCount, Span<float> dest)
+    {
+        ushort* srcPtr = (ushort*)src;
+        fixed (float* destPtr = dest)
+        {
+            uint* destIntPtr = (uint*)destPtr;
+            for (int i = 0; i < (int)elementCount; i++)
+            {
+                destIntPtr[i] = (uint)srcPtr[i] << 16;
+            }
+        }
     }
 
     [SkipLocalsInit]

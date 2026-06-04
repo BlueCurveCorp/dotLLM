@@ -140,8 +140,9 @@ Step 22 (done) ──────► Step 30 (NUMA + Spin-wait)
 | 56 | **SmolLM3 architecture** | HuggingFace SmolLM3-3B. NoPE layer support in attention (skip RoPE application on marked layers). YARN context extension for 128k. GQA with 4 groups. Tool calling via `xml_tools` (Hermes-compatible) or `python_tools` (`PythonicToolCallParser`). | Phase 1 |
 | 57 | **Gemma 4 architecture** | Google Gemma 4 model family. GeGLU activation, RMS pre-norm with per-layer scaling, interleaved local/global attention, logit soft-capping. `GemmaModel` implementing `IModel` via `TransformerBlock` parameterization. | Phase 1 |
 | 58 | **Mixture of Experts** | MoE FFN with top-K expert routing. `IExpertRouter` interface, `MoeFFN` block replacing standard FFN. Sparse activation — only K of N experts compute per token. Shared expert support (DeepSeek-style). Memory: all expert weights loaded, only active experts computed. Covers: DeepSeek-V2 MoE, Granite hybrid MoE, Qwen-MoE. | Phase 1 |
+| 61 | **SafeTensors & Repackager** | Load and map SafeTensors format models. Includes a load-time repackager to map AWQ/GPTQ tensors into `Q4_K`/`Q4_0` layout blocks for engine compatibility. | Phase 1 |
 
-**Milestone**: DeepSeek-V2/V3 inference, SmolLM3 with NoPE, Gemma 4, and MoE models running correctly.
+**Milestone**: DeepSeek-V2/V3 inference, SmolLM3 with NoPE, Gemma 4, MoE models running correctly, and native SafeTensors/AWQ/GPTQ model loading.
 
 ## Phase 9 — Production Serving
 

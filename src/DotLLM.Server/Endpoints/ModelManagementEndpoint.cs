@@ -64,10 +64,10 @@ public static class ModelManagementEndpoint
                     state.KvCacheFactory = newState.KvCacheFactory;
                     state.PrefixCache = newState.PrefixCache;
                     state.LoadedModelPath = resolvedPath;
-                    state.CurrentGguf = newState.CurrentGguf;
+                    state.Container = newState.Container;
                     state.DraftModel = newState.DraftModel;
                     state.DraftModelPath = newState.DraftModelPath;
-                    state.DraftGguf = newState.DraftGguf;
+                    state.DraftContainer = newState.DraftContainer;
 
                     await Task.CompletedTask;
                 }, ct);

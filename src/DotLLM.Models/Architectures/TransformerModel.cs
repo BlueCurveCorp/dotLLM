@@ -8,8 +8,6 @@ using DotLLM.Core.Models;
 using DotLLM.Core.Tensors;
 using DotLLM.Cpu.Kernels;
 using DotLLM.Cpu.Threading;
-using DotLLM.Models.Gguf;
-
 namespace DotLLM.Models.Architectures;
 
 /// <summary>
@@ -29,7 +27,7 @@ public sealed unsafe class TransformerModel : IModel
 
     private readonly TransformerWeights _weights;
     private readonly TransformerForwardState _state;
-    private readonly GgufFile _gguf; // prevent premature GC of mmap
+    private readonly IModelContainer _container; // prevent premature GC of mmap
     private readonly int _ropeDim;
     private readonly RoPEType _ropeType;
     private readonly int? _slidingWindowSize;
@@ -46,13 +44,13 @@ public sealed unsafe class TransformerModel : IModel
     internal int DebugMaxLayers { get; set; }
 
     private TransformerModel(ModelConfig config, TransformerWeights weights, TransformerForwardState state,
-                       GgufFile gguf, int ropeDim, RoPEType ropeType,
+                       IModelContainer container, int ropeDim, RoPEType ropeType,
                        ComputeThreadPool? threadPool, bool ownsPool)
     {
         Config = config;
         _weights = weights;
         _state = state;
-        _gguf = gguf;
+        _container = container;
         _ropeDim = ropeDim;
         _ropeType = ropeType;
         _slidingWindowSize = config.SlidingWindowSize;
@@ -61,20 +59,21 @@ public sealed unsafe class TransformerModel : IModel
     }
 
     /// <summary>
-    /// Loads a transformer model from an opened GGUF file (single-threaded).
-    /// The <paramref name="gguf"/> must remain alive for the lifetime of the returned model.
+    /// Loads a transformer model from a model container (single-threaded).
+    /// The <paramref name="container"/> must remain alive for the lifetime of the returned model.
     /// </summary>
-    public static TransformerModel LoadFromGguf(GgufFile gguf, ModelConfig config)
-        => LoadFromGguf(gguf, config, ThreadingConfig.SingleThreaded);
+    public static TransformerModel Load(IModelContainer container)
+        => Load(container, ThreadingConfig.SingleThreaded);
 
     /// <summary>
-    /// Loads a transformer model from an opened GGUF file with threading configuration.
+    /// Loads a transformer model from a model container with threading configuration.
     /// When <paramref name="threading"/> is parallel, creates a <see cref="ComputeThreadPool"/>
     /// owned by this model (disposed with the model).
     /// </summary>
-    public static TransformerModel LoadFromGguf(GgufFile gguf, ModelConfig config, ThreadingConfig threading)
+    public static TransformerModel Load(IModelContainer container, ThreadingConfig threading)
     {
-        var weights = TransformerWeights.LoadFromGguf(gguf, config);
+        var config = container.Config;
+        var weights = TransformerWeights.Load(container);
         weights.RepackWeights();
 
         int ropeDim = config.RoPEConfig?.DimensionCount ?? config.HeadDim;
@@ -114,7 +113,7 @@ public sealed unsafe class TransformerModel : IModel
             }
         }
 
-        return new TransformerModel(config, weights, state, gguf, ropeDim, ropeType, pool, ownsPool: pool is not null);
+        return new TransformerModel(config, weights, state, container, ropeDim, ropeType, pool, ownsPool: pool != null);
     }
 
     /// <inheritdoc/>
@@ -816,7 +815,8 @@ public sealed unsafe class TransformerModel : IModel
         if (_ownsThreadPool)
             _threadPool?.Dispose();
         _state.Dispose();
-        _weights.Dispose(); // free R4-interleaved weight buffers
+        _weights.Dispose();
+        _container.Dispose();
         // _gguf is not owned by us — caller manages GgufFile lifetime.
     }
 }

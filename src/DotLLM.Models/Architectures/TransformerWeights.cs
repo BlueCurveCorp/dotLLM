@@ -1,7 +1,6 @@
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Cpu.Kernels;
-using DotLLM.Models.Gguf;
 
 namespace DotLLM.Models.Architectures;
 
@@ -174,39 +173,42 @@ internal sealed class TransformerWeights : IDisposable
     }
 
     /// <summary>
-    /// Loads all weight references from an opened GGUF file.
+    /// Loads all weight references from a model container.
     /// Norm weights are dequantized to <c>float[]</c>. Linear projections stay as mmap pointers.
     /// </summary>
-    public static TransformerWeights LoadFromGguf(GgufFile gguf, ModelConfig config)
+    public static TransformerWeights Load(IModelContainer container)
     {
-        nint dataBase = gguf.DataBasePointer;
-        var tensors = gguf.TensorsByName;
+        var config = container.Config;
 
         // Token embeddings
-        var embDesc = tensors["token_embd.weight"];
-        nint embPtr = dataBase + (nint)embDesc.DataOffset;
+        if (!container.TryGetTensor("token_embd.weight", out var embDesc))
+            throw new KeyNotFoundException("Token embeddings 'token_embd.weight' not found in model container.");
+
+        nint embPtr = embDesc.Pointer;
 
         // Per-layer weights
         var layers = new TransformerLayerWeights[config.NumLayers];
         for (int i = 0; i < config.NumLayers; i++)
         {
-            layers[i] = LoadLayer(i, dataBase, tensors, config);
+            layers[i] = LoadLayer(i, container);
         }
 
         // Output norm
-        var outNormDesc = tensors["output_norm.weight"];
-        float[] outputNormWeight = DequantizeNorm(dataBase, outNormDesc, config.HiddenSize);
+        if (!container.TryGetTensor("output_norm.weight", out var outNormDesc))
+            throw new KeyNotFoundException("Output norm 'output_norm.weight' not found in model container.");
+
+        float[] outputNormWeight = DequantizeNorm(outNormDesc, config.HiddenSize);
 
         // LM head — may be tied to token embeddings
         nint outputPtr;
         QuantizationType outputQt;
         int outputM, outputK;
 
-        if (tensors.TryGetValue("output.weight", out var outDesc))
+        if (container.TryGetTensor("output.weight", out var outDesc))
         {
-            outputPtr = dataBase + (nint)outDesc.DataOffset;
+            outputPtr = outDesc.Pointer;
             outputQt = outDesc.QuantizationType;
-            // GGUF: Dimensions[0] = input dim (K), Dimensions[1] = output dim (M)
+            // Convention: Dimensions[0] = input dim (K), Dimensions[1] = output dim (M)
             outputK = outDesc.Shape[0];
             outputM = outDesc.Shape[1];
         }
@@ -276,26 +278,26 @@ internal sealed class TransformerWeights : IDisposable
 
     private static TransformerLayerWeights LoadLayer(
         int layerIdx,
-        nint dataBase,
-        IReadOnlyDictionary<string, GgufTensorDescriptor> tensors,
-        ModelConfig config)
+        IModelContainer container)
     {
+        ModelConfig config = container.Config;
         string prefix = $"blk.{layerIdx}";
         int hiddenSize = config.HiddenSize;
 
         // Attention norm — dequantize to float[]
-        var attnNormDesc = tensors[$"{prefix}.attn_norm.weight"];
-        float[] attnNorm = DequantizeNorm(dataBase, attnNormDesc, hiddenSize);
+        if (!container.TryGetTensor($"{prefix}.attn_norm.weight", out var attnNormDesc))
+            throw new KeyNotFoundException($"Attention norm '{prefix}.attn_norm.weight' not found.");
+        float[] attnNorm = DequantizeNorm(attnNormDesc, hiddenSize);
 
         // Q/K/V projections — check for fused attn_qkv.weight (Phi-3 style)
         nint qPtr, kPtr, vPtr;
         QuantizationType qQt, kQt, vQt;
         int qM, qK, kM, kK, vM, vK;
 
-        if (tensors.TryGetValue($"{prefix}.attn_qkv.weight", out var qkvDesc))
+        if (container.TryGetTensor($"{prefix}.attn_qkv.weight", out var qkvDesc))
         {
             // Fused QKV — split by row offset
-            nint qkvPtr = dataBase + (nint)qkvDesc.DataOffset;
+            nint qkvPtr = qkvDesc.Pointer;
             int inputDim = qkvDesc.Shape[0]; // hidden_size
             long rowBytes = Dequantize.RowByteSize(inputDim, qkvDesc.QuantizationType);
 
@@ -309,19 +311,19 @@ internal sealed class TransformerWeights : IDisposable
         else
         {
             // Separate Q/K/V (standard path)
-            (qPtr, qQt, qM, qK) = LoadLinear(dataBase, tensors[$"{prefix}.attn_q.weight"]);
-            (kPtr, kQt, kM, kK) = LoadLinear(dataBase, tensors[$"{prefix}.attn_k.weight"]);
-            (vPtr, vQt, vM, vK) = LoadLinear(dataBase, tensors[$"{prefix}.attn_v.weight"]);
+            (qPtr, qQt, qM, qK) = LoadLinear(container, $"{prefix}.attn_q.weight");
+            (kPtr, kQt, kM, kK) = LoadLinear(container, $"{prefix}.attn_k.weight");
+            (vPtr, vQt, vM, vK) = LoadLinear(container, $"{prefix}.attn_v.weight");
         }
 
-        var (oPtr, oQt, oM, oK) = LoadLinear(dataBase, tensors[$"{prefix}.attn_output.weight"]);
+        var (oPtr, oQt, oM, oK) = LoadLinear(container, $"{prefix}.attn_output.weight");
 
         // Optional biases — check for fused attn_qkv.bias (Phi-3 style)
         float[]? qBias, kBias, vBias;
-        if (tensors.TryGetValue($"{prefix}.attn_qkv.bias", out var qkvBiasDesc))
+        if (container.TryGetTensor($"{prefix}.attn_qkv.bias", out var qkvBiasDesc))
         {
             // Fused QKV bias — split by element offset
-            nint biasPtr = dataBase + (nint)qkvBiasDesc.DataOffset;
+            nint biasPtr = qkvBiasDesc.Pointer;
             int qDim = config.NumAttentionHeads * config.HeadDim;
             int kvDim = config.NumKvHeads * config.HeadDim;
 
@@ -335,19 +337,20 @@ internal sealed class TransformerWeights : IDisposable
         }
         else
         {
-            qBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_q.bias");
-            kBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_k.bias");
-            vBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_v.bias");
+            qBias = LoadOptionalBias(container, $"{prefix}.attn_q.bias");
+            kBias = LoadOptionalBias(container, $"{prefix}.attn_k.bias");
+            vBias = LoadOptionalBias(container, $"{prefix}.attn_v.bias");
         }
-        float[]? oBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_output.bias");
+        float[]? oBias = LoadOptionalBias(container, $"{prefix}.attn_output.bias");
 
         // Optional QK-norms (Qwen3-style): per-head RMSNorm applied to Q/K after projection, before RoPE
-        float[]? qNormWeight = LoadOptionalNorm(dataBase, tensors, $"{prefix}.attn_q_norm.weight", config.HeadDim);
-        float[]? kNormWeight = LoadOptionalNorm(dataBase, tensors, $"{prefix}.attn_k_norm.weight", config.HeadDim);
+        float[]? qNormWeight = LoadOptionalNorm(container, $"{prefix}.attn_q_norm.weight", config.HeadDim);
+        float[]? kNormWeight = LoadOptionalNorm(container, $"{prefix}.attn_k_norm.weight", config.HeadDim);
 
         // FFN norm
-        var ffnNormDesc = tensors[$"{prefix}.ffn_norm.weight"];
-        float[] ffnNorm = DequantizeNorm(dataBase, ffnNormDesc, hiddenSize);
+        if (!container.TryGetTensor($"{prefix}.ffn_norm.weight", out var ffnNormDesc))
+            throw new KeyNotFoundException($"FFN norm '{prefix}.ffn_norm.weight' not found.");
+        float[] ffnNorm = DequantizeNorm(ffnNormDesc, hiddenSize);
 
         // FFN projections — check for fused gate+up (Phi-3 style: ffn_up.weight has 2x intermediate rows)
         nint gatePtr, upPtr, downPtr;
@@ -355,23 +358,25 @@ internal sealed class TransformerWeights : IDisposable
         int gateM, gateK, upM, upK, downM, downK;
         float[]? gateBias, upBias, downBias;
 
-        (downPtr, downQt, downM, downK) = LoadLinear(dataBase, tensors[$"{prefix}.ffn_down.weight"]);
-        downBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.ffn_down.bias");
+        (downPtr, downQt, downM, downK) = LoadLinear(container, $"{prefix}.ffn_down.weight");
+        downBias = LoadOptionalBias(container, $"{prefix}.ffn_down.bias");
 
-        if (tensors.TryGetValue($"{prefix}.ffn_gate.weight", out var gateDesc))
+        if (container.TryGetTensor($"{prefix}.ffn_gate.weight", out var gateDesc))
         {
             // Standard separate gate/up (Llama, Mistral, Qwen)
-            (gatePtr, gateQt, gateM, gateK) = LoadLinear(dataBase, gateDesc);
-            (upPtr, upQt, upM, upK) = LoadLinear(dataBase, tensors[$"{prefix}.ffn_up.weight"]);
-            gateBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.ffn_gate.bias");
-            upBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.ffn_up.bias");
+            (gatePtr, gateQt, gateM, gateK) = LoadLinear(container, gateDesc);
+            (upPtr, upQt, upM, upK) = LoadLinear(container, $"{prefix}.ffn_up.weight");
+            gateBias = LoadOptionalBias(container, $"{prefix}.ffn_gate.bias");
+            upBias = LoadOptionalBias(container, $"{prefix}.ffn_up.bias");
         }
         else
         {
             // Fused gate+up in ffn_up.weight (Phi-3 style): output dim = 2 * intermediate_size
             // Split: first intermediate_size rows = gate, next intermediate_size rows = up
-            var fusedDesc = tensors[$"{prefix}.ffn_up.weight"];
-            nint fusedPtr = dataBase + (nint)fusedDesc.DataOffset;
+            if (!container.TryGetTensor($"{prefix}.ffn_up.weight", out var fusedDesc))
+                throw new KeyNotFoundException($"FFN up '{prefix}.ffn_up.weight' not found.");
+
+            nint fusedPtr = fusedDesc.Pointer;
             int inputDim = fusedDesc.Shape[0]; // hidden_size
             int fusedOutputDim = fusedDesc.Shape[1]; // 2 * intermediate_size
             int halfDim = fusedOutputDim / 2;
@@ -381,9 +386,9 @@ internal sealed class TransformerWeights : IDisposable
             upPtr = fusedPtr + (nint)(halfDim * rowBytes); upQt = fusedDesc.QuantizationType; upM = halfDim; upK = inputDim;
 
             // Fused bias split (if present)
-            if (tensors.TryGetValue($"{prefix}.ffn_up.bias", out var fusedBiasDesc))
+            if (container.TryGetTensor($"{prefix}.ffn_up.bias", out var fusedBiasDesc))
             {
-                nint biasPtr = dataBase + (nint)fusedBiasDesc.DataOffset;
+                nint biasPtr = fusedBiasDesc.Pointer;
                 gateBias = new float[halfDim];
                 upBias = new float[halfDim];
                 Dequantize.ToFloat32(biasPtr, halfDim, fusedBiasDesc.QuantizationType, gateBias);
@@ -412,43 +417,47 @@ internal sealed class TransformerWeights : IDisposable
     }
 
     private static (nint ptr, QuantizationType qt, int outputDim, int inputDim) LoadLinear(
-        nint dataBase, GgufTensorDescriptor desc)
+        IModelContainer container, string name)
     {
-        nint ptr = dataBase + (nint)desc.DataOffset;
-        // GGUF: Dimensions[0] = input dim (K), Dimensions[1] = output dim (M)
-        int k = desc.Shape[0];
-        int m = desc.Shape[1];
-        return (ptr, desc.QuantizationType, m, k);
+        if (!container.TryGetTensor(name, out var tensor))
+            throw new KeyNotFoundException($"Linear weight tensor '{name}' not found.");
+        return LoadLinear(container, tensor);
     }
 
-    private static float[] DequantizeNorm(nint dataBase, GgufTensorDescriptor desc, int expectedSize)
+    private static (nint ptr, QuantizationType qt, int outputDim, int inputDim) LoadLinear(
+        IModelContainer container, ModelTensor tensor)
     {
-        nint ptr = dataBase + (nint)desc.DataOffset;
+        // GGUF/dotLLM convention: Dimensions[0] = input dim (K), Dimensions[1] = output dim (M)
+        int k = tensor.Shape[0];
+        int m = tensor.Shape[1];
+        return (tensor.Pointer, tensor.QuantizationType, m, k);
+    }
+
+    private static float[] DequantizeNorm(ModelTensor tensor, int expectedSize)
+    {
         float[] result = new float[expectedSize];
-        Dequantize.ToFloat32(ptr, expectedSize, desc.QuantizationType, result);
+        Dequantize.ToFloat32(tensor.Pointer, expectedSize, tensor.QuantizationType, result);
         return result;
     }
 
     /// <summary>
     /// Loads an optional norm weight tensor. Returns null when the tensor is absent.
     /// </summary>
-    private static float[]? LoadOptionalNorm(nint dataBase,
-        IReadOnlyDictionary<string, GgufTensorDescriptor> tensors, string name, int expectedSize)
+    private static float[]? LoadOptionalNorm(IModelContainer container, string name, int expectedSize)
     {
-        if (!tensors.TryGetValue(name, out var desc)) return null;
-        return DequantizeNorm(dataBase, desc, expectedSize);
+        if (!container.TryGetTensor(name, out var tensor)) return null;
+        return DequantizeNorm(tensor, expectedSize);
     }
 
     /// <summary>
-    /// Loads an optional bias tensor (F32 in GGUF). Returns null when the tensor is absent.
+    /// Loads an optional bias tensor. Returns null when the tensor is absent.
     /// </summary>
-    private static float[]? LoadOptionalBias(nint dataBase,
-        IReadOnlyDictionary<string, GgufTensorDescriptor> tensors, string name)
+    private static float[]? LoadOptionalBias(IModelContainer container, string name)
     {
-        if (!tensors.TryGetValue(name, out var desc)) return null;
-        int size = (int)desc.Shape.ElementCount;
+        if (!container.TryGetTensor(name, out var tensor)) return null;
+        int size = (int)tensor.Shape.ElementCount;
         float[] result = new float[size];
-        Dequantize.ToFloat32(dataBase + (nint)desc.DataOffset, size, desc.QuantizationType, result);
+        Dequantize.ToFloat32(tensor.Pointer, size, tensor.QuantizationType, result);
         return result;
     }
 }

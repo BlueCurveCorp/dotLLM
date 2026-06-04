@@ -5,6 +5,7 @@ using DotLLM.Core.Tensors;
 using DotLLM.Cuda;
 using DotLLM.Cuda.Interop;
 using DotLLM.Engine.KvCache;
+using DotLLM.Models;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using Xunit;
@@ -123,36 +124,34 @@ public class CudaDecodeDebugTest
             ".dotllm", "models", "Qwen", "Qwen2.5-0.5B-Instruct-GGUF", "qwen2.5-0.5b-instruct-q8_0.gguf");
         Skip.If(!File.Exists(modelPath), "Qwen2.5-0.5B-Instruct Q8_0 GGUF not found");
 
-        var gguf = GgufFile.Open(modelPath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-
-        int[] promptTokens = GgufBpeTokenizerFactory.Load(gguf.Metadata).Encode("The capital of France is");
+        using var container = GgufModelContainer.Open(modelPath);
+        var config = container.Config;
+        var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
+        int[] promptTokens = tokenizer.Encode("The capital of France is");
         int[] positions = new int[promptTokens.Length];
         for (int i = 0; i < positions.Length; i++) positions[i] = i;
 
-        string ptxDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "native", "ptx"));
-
         // Baseline: full GPU (NeoX RoPE + biases)
-        RunFeatureTest("Baseline (NeoX+bias)", gguf, config, promptTokens, positions, ptxDir,
+        RunFeatureTest("Baseline (NeoX+bias)", container, config, promptTokens, positions,
             ropeOverride: -1, skipBias: false);
         // Test 1: Force Norm RoPE (wrong results, but shows error contribution of RoPE type)
-        RunFeatureTest("Force Norm RoPE", gguf, config, promptTokens, positions, ptxDir,
+        RunFeatureTest("Force Norm RoPE", container, config, promptTokens, positions,
             ropeOverride: 0, skipBias: false);
         // Test 2: Skip biases (wrong results, but shows error contribution of biases)
-        RunFeatureTest("Skip biases", gguf, config, promptTokens, positions, ptxDir,
+        RunFeatureTest("Skip biases", container, config, promptTokens, positions,
             ropeOverride: -1, skipBias: true);
         // Test 3: Both disabled
-        RunFeatureTest("Norm RoPE + no bias", gguf, config, promptTokens, positions, ptxDir,
+        RunFeatureTest("Norm RoPE + no bias", container, config, promptTokens, positions,
             ropeOverride: 0, skipBias: true);
     }
 
-    private unsafe void RunFeatureTest(string label, GgufFile gguf, ModelConfig config,
-        int[] promptTokens, int[] positions, string ptxDir, int ropeOverride, bool skipBias)
+    private unsafe void RunFeatureTest(string label, IModelContainer container, ModelConfig config,
+        int[] promptTokens, int[] positions, int ropeOverride, bool skipBias)
     {
-        var cpuModel = TransformerModel.LoadFromGguf(gguf, config);
+        var cpuModel = TransformerModel.Load(container);
         cpuModel.DebugMaxLayers = 1;
 
-        var gpuModel = CudaTransformerModel.LoadFromGguf(gguf, config, 0, ptxDir);
+        var gpuModel = CudaTransformerModel.Load(container, 0);
         gpuModel.DebugMaxLayers = 1;
         gpuModel.DebugRopeTypeOverride = ropeOverride;
         gpuModel.DebugSkipBias = skipBias;
@@ -171,9 +170,9 @@ public class CudaDecodeDebugTest
 
     private unsafe void RunLayerBisect(string modelPath, string prompt)
     {
-        var gguf = GgufFile.Open(modelPath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+        using var container = GgufModelContainer.Open(modelPath);
+        var config = container.Config;
+        var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
 
         _out.WriteLine($"Model: {Path.GetFileName(modelPath)}");
         _out.WriteLine($"Config: {config.Architecture} {config.NumLayers}L/{config.HiddenSize}H " +
@@ -191,9 +190,9 @@ public class CudaDecodeDebugTest
         {
             if (maxLayers > config.NumLayers) break;
 
-            var cpuModel = TransformerModel.LoadFromGguf(gguf, config);
+            var cpuModel = TransformerModel.Load(container);
             cpuModel.DebugMaxLayers = maxLayers;
-            var gpuModel = CudaTransformerModel.LoadFromGguf(gguf, config, 0, ptxDir);
+            var gpuModel = CudaTransformerModel.Load(container, 0);
             gpuModel.DebugMaxLayers = maxLayers;
 
             using var cpuLogits = cpuModel.Forward(promptTokens, positions, -1);
@@ -215,9 +214,9 @@ public class CudaDecodeDebugTest
 
     private unsafe void RunDecodeComparison(string modelPath, string prompt, int decodeSteps)
     {
-        var gguf = GgufFile.Open(modelPath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+        using var container = GgufModelContainer.Open(modelPath);
+        var config = container.Config;
+        var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
 
         _out.WriteLine($"Model: {Path.GetFileName(modelPath)}");
         _out.WriteLine($"Config: {config.Architecture} {config.NumLayers}L/{config.HiddenSize}H " +
@@ -225,12 +224,11 @@ public class CudaDecodeDebugTest
         _out.WriteLine($"RoPE: type={config.RoPEConfig?.Type} dim={config.RoPEConfig?.DimensionCount} theta={config.RoPEConfig?.Theta}");
 
         // CPU model
-        var cpuModel = TransformerModel.LoadFromGguf(gguf, config);
+        var cpuModel = TransformerModel.Load(container);
         var cpuKv = new SimpleKvCache(config.NumLayers, config.NumKvHeads, config.HeadDim, 64);
 
         // GPU model
-        string ptxDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "native", "ptx"));
-        var gpuModel = CudaTransformerModel.LoadFromGguf(gguf, config, 0, ptxDir);
+        var gpuModel = CudaTransformerModel.Load(container, 0);
         var gpuKv = gpuModel.CreateKvCache(64);
 
         int[] promptTokens = tokenizer.Encode(prompt);

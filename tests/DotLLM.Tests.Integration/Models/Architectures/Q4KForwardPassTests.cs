@@ -27,13 +27,12 @@ public class Q4KForwardPassTests
         _fixture = fixture;
     }
 
-    private (TransformerModel model, GgufFile gguf, BpeTokenizer tokenizer) LoadModel()
+    private (TransformerModel model, GgufModelContainer container, BpeTokenizer tokenizer) LoadModel()
     {
-        var gguf = GgufFile.Open(_fixture.FilePath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var model = TransformerModel.LoadFromGguf(gguf, config);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
-        return (model, gguf, tokenizer);
+        var container = GgufModelContainer.Open(_fixture.FilePath);
+        var model = TransformerModel.Load(container);
+        var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
+        return (model, container, tokenizer);
     }
 
     // ──────────────────── Model loading ────────────────────
@@ -41,9 +40,9 @@ public class Q4KForwardPassTests
     [Fact]
     public void Load_DetectsKQuantTensors()
     {
-        using var gguf = GgufFile.Open(_fixture.FilePath);
+        using var container = GgufModelContainer.Open(_fixture.FilePath);
 
-        var quantTypes = gguf.Tensors
+        var quantTypes = container.Tensors
             .Select(t => t.QuantizationType)
             .Distinct()
             .ToHashSet();
@@ -56,8 +55,8 @@ public class Q4KForwardPassTests
     [Fact]
     public void Load_ModelConfigIsValid()
     {
-        using var gguf = GgufFile.Open(_fixture.FilePath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
+        using var container = GgufModelContainer.Open(_fixture.FilePath);
+        var config = container.Config;
 
         Assert.True(config.VocabSize > 0);
         Assert.True(config.NumLayers > 0);
@@ -70,13 +69,13 @@ public class Q4KForwardPassTests
     [Fact]
     public void DequantizeQ4K_RealTensor_AllFiniteAndReasonable()
     {
-        using var gguf = GgufFile.Open(_fixture.FilePath);
+        using var container = GgufModelContainer.Open(_fixture.FilePath);
 
-        var tensor = gguf.Tensors.FirstOrDefault(t => t.QuantizationType == QuantizationType.Q4_K);
+        var tensor = container.Tensors.FirstOrDefault(t => t.QuantizationType == QuantizationType.Q4_K);
         if (tensor.Name is null) return; // skip if no Q4_K tensors
 
         long elementCount = tensor.Shape.ElementCount;
-        nint tensorPtr = gguf.DataBasePointer + (nint)tensor.DataOffset;
+        nint tensorPtr = tensor.Pointer;
 
         float[] dest = new float[elementCount];
         Dequantize.ToFloat32(tensorPtr, elementCount, QuantizationType.Q4_K, dest);
@@ -91,13 +90,13 @@ public class Q4KForwardPassTests
     [Fact]
     public void DequantizeQ6K_RealTensor_AllFiniteAndReasonable()
     {
-        using var gguf = GgufFile.Open(_fixture.FilePath);
+        using var container = GgufModelContainer.Open(_fixture.FilePath);
 
-        var tensor = gguf.Tensors.FirstOrDefault(t => t.QuantizationType == QuantizationType.Q6_K);
+        var tensor = container.Tensors.FirstOrDefault(t => t.QuantizationType == QuantizationType.Q6_K);
         if (tensor.Name is null) return;
 
         long elementCount = tensor.Shape.ElementCount;
-        nint tensorPtr = gguf.DataBasePointer + (nint)tensor.DataOffset;
+        nint tensorPtr = tensor.Pointer;
 
         float[] dest = new float[elementCount];
         Dequantize.ToFloat32(tensorPtr, elementCount, QuantizationType.Q6_K, dest);
@@ -114,8 +113,8 @@ public class Q4KForwardPassTests
     [Fact]
     public void SingleToken_ProducesVocabSizedLogits()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int bosId = tokenizer.BosTokenId;
@@ -129,8 +128,8 @@ public class Q4KForwardPassTests
     [Fact]
     public void SingleToken_LogitsAreFinite()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int bosId = tokenizer.BosTokenId;
@@ -150,8 +149,8 @@ public class Q4KForwardPassTests
     [Fact]
     public void SameInput_ProducesSameOutput()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         int bosId = tokenizer.BosTokenId;
@@ -175,8 +174,8 @@ public class Q4KForwardPassTests
     [Fact]
     public void GreedyGeneration_ProducesNonEmptyOutput()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -191,8 +190,8 @@ public class Q4KForwardPassTests
     [Fact]
     public void GreedyGeneration_ProducesCoherentTokensForKnowledge()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -208,8 +207,8 @@ public class Q4KForwardPassTests
     [Fact]
     public void GreedyGeneration_WithKvCache_ProducesCoherentOutput()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
@@ -232,8 +231,8 @@ public class Q4KForwardPassTests
     [Fact]
     public void SeededSampling_IsDeterministic()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var options = new InferenceOptions { Temperature = 0.8f, Seed = 42, MaxTokens = 10 };
@@ -251,8 +250,8 @@ public class Q4KForwardPassTests
     [Fact]
     public void Timings_ArePopulated()
     {
-        var (model, gguf, tokenizer) = LoadModel();
-        using var _ = gguf;
+        var (model, container, tokenizer) = LoadModel();
+        using var _ = container;
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);

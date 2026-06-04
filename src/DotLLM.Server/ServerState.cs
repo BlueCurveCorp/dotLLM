@@ -4,7 +4,7 @@ using DotLLM.Core.Models;
 using DotLLM.Engine;
 using DotLLM.Engine.KvCache;
 using DotLLM.Engine.PromptCache;
-using DotLLM.Models.Gguf;
+using DotLLM.Models;
 using DotLLM.Tokenizers;
 using DotLLM.Tokenizers.ChatTemplates;
 
@@ -63,8 +63,8 @@ public sealed class ServerState : IDisposable
     /// <summary>Path of the currently loaded GGUF file.</summary>
     public string LoadedModelPath { get; set; } = "";
 
-    /// <summary>Open GGUF file handle (disposed on model swap).</summary>
-    public GgufFile? CurrentGguf { get; set; }
+    /// <summary>Open model container (disposed on model swap).</summary>
+    public IModelContainer? Container { get; set; }
 
     /// <summary>Draft model for speculative decoding (null when disabled).</summary>
     public IModel? DraftModel { get; set; }
@@ -72,8 +72,8 @@ public sealed class ServerState : IDisposable
     /// <summary>Path of the loaded draft model GGUF file.</summary>
     public string DraftModelPath { get; set; } = "";
 
-    /// <summary>Open draft GGUF file handle (disposed on model swap).</summary>
-    public GgufFile? DraftGguf { get; set; }
+    /// <summary>Open draft model container (disposed on model swap).</summary>
+    public IModelContainer? DraftContainer { get; set; }
 
     /// <summary>
     /// Executes a request with sequential access control.
@@ -102,11 +102,11 @@ public sealed class ServerState : IDisposable
             PagedFactory = null;
             DraftModel?.Dispose();
             DraftModel = null;
-            DraftGguf?.Dispose();
-            DraftGguf = null;
+            DraftContainer?.Dispose();
+            DraftContainer = null;
             Model?.Dispose();
-            CurrentGguf?.Dispose();
-            CurrentGguf = null;
+            Container?.Dispose();
+            Container = null;
 
             await loadAction();
             IsReady = true;
@@ -120,9 +120,9 @@ public sealed class ServerState : IDisposable
         PrefixCache?.Dispose();
         PagedFactory?.Dispose();
         DraftModel?.Dispose();
-        DraftGguf?.Dispose();
+        DraftContainer?.Dispose();
         Model?.Dispose();
-        CurrentGguf?.Dispose();
+        Container?.Dispose();
         _requestGate.Dispose();
     }
 }

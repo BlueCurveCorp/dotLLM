@@ -80,6 +80,110 @@ public static unsafe partial class MatMul
     }
 
     /// <summary>
+    /// BF16 GEMV: A is BF16 [M,K], x is f32 [K].
+    /// </summary>
+    [SkipLocalsInit]
+    public static void GemvBf16(ushort* a, float* x, float* result, int m, int k)
+    {
+        if (Avx512F.IsSupported && Avx512BW.IsSupported)
+        {
+            GemvBf16Avx512(a, x, result, m, k);
+        }
+        else if (Avx2.IsSupported)
+        {
+            GemvBf16Avx2(a, x, result, m, k);
+        }
+        else
+        {
+            GemvBf16Scalar(a, x, result, m, k);
+        }
+    }
+
+    [SkipLocalsInit]
+    internal static void GemvBf16Scalar(ushort* a, float* x, float* result, int m, int k)
+    {
+        for (int row = 0; row < m; row++)
+        {
+            float sum = 0;
+            ushort* rowPtr = a + row * k;
+            for (int j = 0; j < k; j++)
+            {
+                uint bits = (uint)rowPtr[j] << 16;
+                sum += BitConverter.Int32BitsToSingle((int)bits) * x[j];
+            }
+            result[row] = sum;
+        }
+    }
+
+    [SkipLocalsInit]
+    internal static void GemvBf16Avx2(ushort* a, float* x, float* result, int m, int k)
+    {
+        for (int row = 0; row < m; row++)
+        {
+            Vector256<float> acc = Vector256<float>.Zero;
+            ushort* rowPtr = a + row * k;
+            int j = 0;
+            for (; j + 7 < k; j += 8)
+            {
+                Vector128<ushort> v16 = Unsafe.ReadUnaligned<Vector128<ushort>>(rowPtr + j);
+                Vector256<uint> v32 = Avx2.ConvertToVector256Int32(v16).AsUInt32();
+                Vector256<uint> shifted = Avx2.ShiftLeftLogical(v32, 16);
+                Vector256<float> vf = shifted.AsSingle();
+
+                Vector256<float> vx = Unsafe.ReadUnaligned<Vector256<float>>(x + j);
+                
+                if (Fma.IsSupported)
+                    acc = Fma.MultiplyAdd(vf, vx, acc);
+                else
+                    acc += vf * vx;
+            }
+            float sum = HorizontalSumAvx2Float(acc);
+            for (; j < k; j++)
+            {
+                uint bits = (uint)rowPtr[j] << 16;
+                sum += BitConverter.Int32BitsToSingle((int)bits) * x[j];
+            }
+            result[row] = sum;
+        }
+    }
+
+    [SkipLocalsInit]
+    internal static void GemvBf16Avx512(ushort* a, float* x, float* result, int m, int k)
+    {
+        for (int row = 0; row < m; row++)
+        {
+            Vector512<float> acc = Vector512<float>.Zero;
+            ushort* rowPtr = a + row * k;
+            int j = 0;
+            for (; j + 15 < k; j += 16)
+            {
+                Vector256<ushort> v16 = Unsafe.ReadUnaligned<Vector256<ushort>>(rowPtr + j);
+                
+                // Zero-extend 16 ushorts into 16 uints (512-bit)
+                Vector512<uint> v32 = Avx512BW.ConvertToVector512Int32(v16).AsUInt32();
+                
+                // Shift left by 16 bits
+                Vector512<uint> shifted = Avx512F.ShiftLeftLogical(v32, 16);
+                Vector512<float> vf = shifted.AsSingle();
+
+                Vector512<float> vx = Unsafe.ReadUnaligned<Vector512<float>>(x + j);
+                
+                acc = Avx512F.FusedMultiplyAdd(vf, vx, acc);
+            }
+            
+            Vector256<float> acc256 = Avx.Add(acc.GetLower(), acc.GetUpper());
+            float sum = HorizontalSumAvx2Float(acc256);
+            
+            for (; j < k; j++)
+            {
+                uint bits = (uint)rowPtr[j] << 16;
+                sum += BitConverter.Int32BitsToSingle((int)bits) * x[j];
+            }
+            result[row] = sum;
+        }
+    }
+
+    /// <summary>
     /// Q8_0 GEMV: A is Q8_0 [M,K], x is f32 [K].
     /// Quantizes x to Q8_0 on-the-fly, then uses Q8_0×Q8_0 VecDot per row.
     /// </summary>
@@ -1202,9 +1306,21 @@ public static unsafe partial class MatMul
     [SkipLocalsInit]
     public static void GemvF16(nint weights, float* x, float* y, int m, int k)
     {
-        const int stackThreshold = 2048; // 8KB of floats
         Half* weightsHalf = (Half*)weights;
 
+        if (Avx512F.IsSupported)
+        {
+            GemvF16Avx512(weightsHalf, x, y, m, k);
+            return;
+        }
+
+        if (Avx2.IsSupported)
+        {
+            GemvF16Avx2(weightsHalf, x, y, m, k);
+            return;
+        }
+
+        const int stackThreshold = 2048; // 8KB of floats
         if (k <= stackThreshold)
         {
             float* rowBuf = stackalloc float[k];
@@ -1233,6 +1349,61 @@ public static unsafe partial class MatMul
             {
                 ArrayPool<float>.Shared.Return(rented);
             }
+        }
+    }
+
+    [SkipLocalsInit]
+    internal static void GemvF16Avx2(Half* a, float* x, float* y, int m, int k)
+    {
+        float* tmp = stackalloc float[8];
+        for (int row = 0; row < m; row++)
+        {
+            Vector256<float> acc = Vector256<float>.Zero;
+            Half* rowPtr = a + row * k;
+            int j = 0;
+            for (; j + 7 < k; j += 8)
+            {
+                TensorPrimitives.ConvertToSingle(new ReadOnlySpan<Half>(rowPtr + j, 8), new Span<float>(tmp, 8));
+                Vector256<float> vf = Unsafe.ReadUnaligned<Vector256<float>>(tmp);
+                Vector256<float> vx = Unsafe.ReadUnaligned<Vector256<float>>(x + j);
+                
+                if (Fma.IsSupported)
+                    acc = Fma.MultiplyAdd(vf, vx, acc);
+                else
+                    acc += vf * vx;
+            }
+            float sum = HorizontalSumAvx2Float(acc);
+            for (; j < k; j++)
+            {
+                sum += (float)rowPtr[j] * x[j];
+            }
+            y[row] = sum;
+        }
+    }
+
+    [SkipLocalsInit]
+    internal static void GemvF16Avx512(Half* a, float* x, float* y, int m, int k)
+    {
+        float* tmp = stackalloc float[16];
+        for (int row = 0; row < m; row++)
+        {
+            Vector512<float> acc = Vector512<float>.Zero;
+            Half* rowPtr = a + row * k;
+            int j = 0;
+            for (; j + 15 < k; j += 16)
+            {
+                TensorPrimitives.ConvertToSingle(new ReadOnlySpan<Half>(rowPtr + j, 16), new Span<float>(tmp, 16));
+                Vector512<float> vf = Unsafe.ReadUnaligned<Vector512<float>>(tmp);
+                Vector512<float> vx = Unsafe.ReadUnaligned<Vector512<float>>(x + j);
+                acc = Avx512F.FusedMultiplyAdd(vf, vx, acc);
+            }
+            Vector256<float> acc256 = Avx.Add(acc.GetLower(), acc.GetUpper());
+            float sum = HorizontalSumAvx2Float(acc256);
+            for (; j < k; j++)
+            {
+                sum += (float)rowPtr[j] * x[j];
+            }
+            y[row] = sum;
         }
     }
 

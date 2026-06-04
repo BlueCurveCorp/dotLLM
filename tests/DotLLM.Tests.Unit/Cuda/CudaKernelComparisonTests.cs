@@ -30,16 +30,24 @@ public class CudaKernelComparisonTests : IDisposable
     public CudaKernelComparisonTests(ITestOutputHelper output)
     {
         _output = output;
-        if (!CudaDevice.IsAvailable()) return;
+        try
+        {
+            if (!CudaDevice.IsAvailable()) return;
 
-        _ctx = CudaContext.Create(0);
-        _stream = CudaStream.Create();
+            _ctx = CudaContext.Create(0);
+            _stream = CudaStream.Create();
 
-        string? ptxDir = FindPtxDir();
-        if (ptxDir != null)
-            _kernels = new CudaKernels(ptxDir);
+            string? ptxDir = FindPtxDir();
+            if (ptxDir != null)
+                _kernels = new CudaKernels(ptxDir);
 
-        _available = _kernels != null;
+            _available = _kernels != null;
+        }
+        catch (Exception ex)
+        {
+            _output.WriteLine($"Hardware initialization failed: {ex.Message}");
+            _available = false;
+        }
     }
 
     private static string? FindPtxDir()

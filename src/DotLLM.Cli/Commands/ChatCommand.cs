@@ -10,6 +10,7 @@ using DotLLM.Engine;
 using DotLLM.Engine.Constraints;
 using DotLLM.Engine.PromptCache;
 using DotLLM.Server;
+using DotLLM.Models;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using DotLLM.Tokenizers;
@@ -209,7 +210,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         if (resolvedPath is null)
             return 1;
 
-        GgufFile? gguf = null;
+        IModelContainer? container = null;
         ModelConfig? config = null;
         Tokenizers.Bpe.BpeTokenizer? tokenizer = null;
         IModel? model = null;
@@ -218,36 +219,34 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
             .Spinner(Spinner.Known.Dots)
             .Start("Loading model...", ctx =>
             {
-                ctx.Status("Opening GGUF file...");
-                gguf = GgufFile.Open(resolvedPath);
+                ctx.Status("Opening file...");
+                container = DotLLM.Server.ModelLoader.OpenContainer(resolvedPath);
 
                 ctx.Status("Extracting model config...");
-                config = GgufModelConfigExtractor.Extract(gguf.Metadata);
+                config = container.Config;
 
                 ctx.Status("Loading tokenizer...");
-                tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+                tokenizer = TokenizerFactory.Load(container, resolvedPath);
 
                 var threading = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
                 ctx.Status($"Loading {config.Architecture} model...");
-                model = ModelLoader.Load(gguf, config, settings.Device, settings.GpuLayers, threading);
+                model = DotLLM.Server.ModelLoader.Load(container!, settings.Device, settings.GpuLayers, threading);
             });
 
         // Display VRAM warning after spinner completes (so it stays visible)
-        string? vramWarning = ModelLoader.GetVramWarning(model!);
+        string? vramWarning = DotLLM.Server.ModelLoader.GetVramWarning(model!);
         if (vramWarning is not null)
             AnsiConsole.MarkupLine($"[yellow]WARNING: {Markup.Escape(vramWarning)}[/]");
 
-        // Create chat template from GGUF metadata, fallback to ChatML
+        // Create chat template from metadata, fallback to ChatML
         string bosTokenStr = tokenizer!.DecodeToken(tokenizer.BosTokenId);
         string eosTokenStr = tokenizer.DecodeToken(tokenizer.EosTokenId);
-        IChatTemplate chatTemplate;
-        var jinjaTemplate = GgufChatTemplateFactory.TryCreate(gguf!.Metadata, tokenizer);
-        chatTemplate = jinjaTemplate ?? new JinjaChatTemplate(DefaultChatMlTemplateText, bosTokenStr, eosTokenStr);
+        var jinjaTemplate = ChatTemplateFactory.TryCreate(container!, tokenizer, resolvedPath);
+        IChatTemplate chatTemplate = jinjaTemplate ?? new JinjaChatTemplate(DefaultChatMlTemplateText, bosTokenStr, eosTokenStr);
 
-        // Parse tool definitions
         ToolDefinition[]? tools = ParseToolDefinitions(settings.Tools);
         IToolCallParser? toolCallParser = tools is { Length: > 0 }
-            ? GgufChatTemplateFactory.CreateToolCallParser(gguf.Metadata, config!.Architecture)
+            ? ChatTemplateFactory.CreateToolCallParser(container!)
             : null;
         ToolChoice toolChoice = ParseToolChoice(settings.ToolChoiceStr, tools);
 
@@ -379,7 +378,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         {
             pagedFactory?.Dispose();
             model?.Dispose();
-            gguf?.Dispose();
+            container?.Dispose();
         }
 
         return 0;

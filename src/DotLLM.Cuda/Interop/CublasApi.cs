@@ -67,6 +67,9 @@ internal static partial class CublasApi
     /// <summary>CUDA_R_16F — FP16 data type.</summary>
     internal const int CUDA_R_16F = 2;
 
+    /// <summary>CUDA_R_16BF — BF16 data type.</summary>
+    internal const int CUDA_R_16BF = 14;
+
     /// <summary>CUDA_R_32F — FP32 data type.</summary>
     internal const int CUDA_R_32F = 0;
 

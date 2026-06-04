@@ -20,18 +20,17 @@ public class ChatTemplateIntegrationTests
     /// <summary>
     /// Loads a GGUF model and returns all components needed for chat inference.
     /// </summary>
-    private static (TransformerModel Model, GgufFile Gguf, BpeTokenizer Tokenizer, IChatTemplate Template, List<string> StopSequences)
+    private static (TransformerModel Model, GgufModelContainer Container, BpeTokenizer Tokenizer, IChatTemplate Template, List<string> StopSequences)
         LoadChatModel(string filePath)
     {
-        var gguf = GgufFile.Open(filePath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
-        var model = TransformerModel.LoadFromGguf(gguf, config);
+        var container = GgufModelContainer.Open(filePath);
+        var tokenizer = GgufBpeTokenizerFactory.Load(container.Metadata);
+        var model = TransformerModel.Load(container);
 
         // Create chat template from GGUF metadata, fallback to ChatML
         string bosToken = tokenizer.DecodeToken(tokenizer.BosTokenId);
         string eosToken = tokenizer.DecodeToken(tokenizer.EosTokenId);
-        var jinjaTemplate = GgufChatTemplateFactory.TryCreate(gguf.Metadata, tokenizer);
+        var jinjaTemplate = GgufChatTemplateFactory.TryCreate(container.Metadata, tokenizer);
         IChatTemplate template = jinjaTemplate
             ?? new JinjaChatTemplate(DefaultChatMlTemplate, bosToken, eosToken);
 
@@ -43,7 +42,7 @@ public class ChatTemplateIntegrationTests
                 stopSequences.Add(marker);
         }
 
-        return (model, gguf, tokenizer, template, stopSequences);
+        return (model, container, tokenizer, template, stopSequences);
     }
 
     private const string DefaultChatMlTemplate =
@@ -58,8 +57,8 @@ public class ChatTemplateIntegrationTests
     private static string GenerateChatResponse(
         string filePath, string systemPrompt, string userMessage, int maxTokens = 64)
     {
-        var (model, gguf, tokenizer, template, stopSequences) = LoadChatModel(filePath);
-        using var _ = gguf;
+        var (model, container, tokenizer, template, stopSequences) = LoadChatModel(filePath);
+        using var _ = container;
         using var __ = model;
 
         // Build conversation
@@ -110,8 +109,8 @@ public class ChatTemplateIntegrationTests
         [Fact]
         public void ChatTemplate_ParsesAndFormatsCorrectly()
         {
-            var (model, gguf, tokenizer, template, _) = LoadChatModel(_fixture.FilePath);
-            using var _ = gguf;
+            var (model, container, tokenizer, template, _) = LoadChatModel(_fixture.FilePath);
+            using var _ = container;
             using var __ = model;
 
             var messages = new List<ChatMessage>
@@ -164,8 +163,8 @@ public class ChatTemplateIntegrationTests
         [Fact]
         public void ChatTemplate_ParsesComplexLlamaTemplate()
         {
-            var (model, gguf, tokenizer, template, _) = LoadChatModel(_fixture.FilePath);
-            using var _ = gguf;
+            var (model, container, tokenizer, template, _) = LoadChatModel(_fixture.FilePath);
+            using var _ = container;
             using var __ = model;
 
             var messages = new List<ChatMessage>

@@ -32,22 +32,21 @@ public class HipLogitComparisonTest
         string? ggufPath = File.Exists(modelPath) ? modelPath : null;
         Skip.If(ggufPath == null, "SmolLM-135M Q8_0 GGUF not found (run: dotllm run QuantFactory/SmolLM-135M-GGUF -q Q8_0)");
 
-        var gguf = GgufFile.Open(ggufPath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
+        using var container = GgufModelContainer.Open(modelPath);
+        var config = container.Config;
         _out.WriteLine($"Model: {config.Architecture} {config.NumLayers}L/{config.HiddenSize}H");
 
         // Load CPU model
-        var cpuModel = TransformerModel.LoadFromGguf(gguf, config);
+        var cpuModel = TransformerModel.Load(container);
         var cpuKv = new SimpleKvCache(config.NumLayers, config.NumKvHeads, config.HeadDim, 64);
 
         // Load GPU model
-        string hsacoDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "native", "Hsaco"));
-        var gpuModel = HipTransformerModel.LoadFromGguf(gguf, config, 0, hsacoDir);
+        var gpuModel = HipTransformerModel.Load(container, 0);
         var gpuKv = gpuModel.CreateKvCache(64);
 
         // Prompt tokens: "The capital of France is" for SmolLM
         int[] promptTokens = [510, 5765, 302, 6181, 349]; // approximate; use actual tokenizer
-        var tokenizer = DotLLM.Models.Gguf.GgufBpeTokenizerFactory.Load(gguf.Metadata);
+        var tokenizer = DotLLM.Models.Gguf.GgufBpeTokenizerFactory.Load(container.Metadata);
         promptTokens = tokenizer.Encode("The capital of France is");
         _out.WriteLine($"Prompt tokens ({promptTokens.Length}): [{string.Join(", ", promptTokens)}]");
 
