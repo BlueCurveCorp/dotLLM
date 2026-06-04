@@ -24,18 +24,21 @@ dotLLM is a ground-up LLM inference engine for .NET — not a wrapper around lla
 ## Key Features
 
 ### Performance
+
 - **Zero-GC inference** — unmanaged memory (`NativeMemory.AlignedAlloc`, 64-byte aligned) for all tensor data; no managed heap allocations on the hot path
 - **SIMD vectorization** — `TensorPrimitives` + hand-tuned `System.Runtime.Intrinsics` for quantized matmul, RMSNorm, RoPE, softmax
 - **Memory-mapped model loading** — GGUF files loaded via `MemoryMappedFile`; OS demand-paging means multi-GB models load in milliseconds
 - **Quantized inference** — FP16, Q8_0, Q4_K_M and other GGUF quantization formats; fused scale×int dot-product kernels operating directly on quantized blocks
 
 ### Architecture Support
+
 - **Transformer models** — Llama, Mistral, Phi, Qwen, DeepSeek via parameterized `TransformerBlock` and `ModelConfig`
 - **Attention mechanisms** — MHA, MQA, GQA via parameterized `ModelConfig`, with `IAttentionStrategy` for kernel selection
 - **Position encoding** — RoPE, ALiBi, absolute, none — pluggable via `IPositionEncoding`
 - **Composable sampling** — `ISamplerStep` chain: repetition penalty → temperature → top-k → top-p → min-p → categorical sample
 
 ### Serving
+
 - **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, tool calling, streaming via ASP.NET
 - **Paged KV-cache** — PagedAttention with block-level allocation, prefix caching, and copy-on-write
 - **Speculative decoding** — draft-verify-accept with KV-cache rollback (greedy mode today; non-greedy planned — see issue #121)
@@ -43,6 +46,7 @@ dotLLM is a ground-up LLM inference engine for .NET — not a wrapper around lla
 - **(Planned) Continuous batching** — iteration-level scheduling with preemption and priority queuing — Phase 9, see [Roadmap](#roadmap)
 
 ### Extensibility
+
 - **Pluggable backends** — `IBackend` interface with separate packages per backend (CPU, CUDA, ROCm)
 - **Diagnostic hooks** — zero-cost `IInferenceHook` points for activation capture, logit lens, SAE integration
 - **(Planned) LoRA adapters** — runtime loading, no weight merging, concurrent multi-adapter serving — Phase 7, see [Roadmap](#roadmap)
@@ -52,7 +56,7 @@ dotLLM is a ground-up LLM inference engine for .NET — not a wrapper around lla
 
 dotLLM is organized as a layered architecture where each layer depends only on the layers below it:
 
-```
+```text
 ┌─────────────────────────────────────────┐
 │            DotLLM.Server                │  ASP.NET OpenAI-compatible API
 ├─────────────────────────────────────────┤
@@ -208,7 +212,7 @@ dotllm run bartowski/Llama-3.2-3B-Instruct-GGUF -q Q8_0 \
 
 Sample output:
 
-```
+```text
 ── dotllm | Llama 30L/576H | Q8_0 | 16 threads | greedy ──────────────────
 The capital of France is Paris. Paris is a city of romance and culture,
 
@@ -254,7 +258,7 @@ In-session commands: `/exit` or `/quit` to leave, `/clear` to reset history (kee
 
 Sample session:
 
-```
+```text
 ── dotllm chat | Llama 30L/576H | Q8_0 | 16 threads | greedy ─────────────
 Type /exit to quit, /clear to reset history, /system <text> to set system prompt.
 
@@ -421,7 +425,7 @@ dotnet test
 ```
 
 > Integration tests automatically download several GGUF models (~4.5 GB total) from HuggingFace to `~/.dotllm/test-cache/` on first run. The first `dotnet test` will take a while; subsequent runs use the cache. To run only unit tests (no downloads): `dotnet test tests/DotLLM.Tests.Unit`.
-
+>
 > **GPU tests** (tagged `Category=GPU`) require an NVIDIA GPU and run full model inference — they can take 20-30 minutes. They are skipped automatically on machines without CUDA. To exclude them explicitly: `dotnet test tests/DotLLM.Tests.Unit/ --filter "Category!=GPU"`
 
 **Model correctness smoke tests** (`scripts/test_models.py`) run dotLLM CLI with greedy decoding across architectures (Llama, Mistral, Phi, Qwen) and verify expected output:
@@ -447,7 +451,7 @@ Models are downloaded from HuggingFace to `~/.dotllm/models/` on first use and c
 
 Sample output:
 
-```
+```text
 Test                                Arch       Result      Time  Details
 =====================================================================================================
 SmolLM-135M                         Llama      PASS        2.1s  Paris  (163.3 tok/s)
@@ -484,7 +488,7 @@ python scripts/bench_compare.py --model QuantFactory/SmolLM-135M-GGUF \
 
 Sample output:
 
-```
+```text
 === dotLLM Benchmark Results ===
 
   Model                  Prefill tok/s   Decode tok/s   Decode ms/tok   Total tok/s     CV
@@ -510,7 +514,7 @@ python scripts/bench_trend.py --all
 
 Sample output (trend across three labeled runs):
 
-```
+```text
                              Benchmark Trend
  Label      Date        Model               Prefill tok/s   Decode tok/s   CV
  baseline   2026-03-11  SmolLM-135M.Q4_K_M          127.6          109.5    -
@@ -536,7 +540,7 @@ python scripts/bench_history.py myrun --last 10 --select
 
 Sample output:
 
-```
+```text
                      Benchmark History -- Llama-3.2-3B-Instruct-Q8_0
  Label                   Date        Prefill tok/s  %chg pf  Decode tok/s  %chg dc     CV
  test_run_0 (f3d3bf8)    2026-03-11          21.2                     7.4              3.8%
@@ -548,7 +552,7 @@ Sample output:
 ```
 
 > `%chg` columns show commit-to-commit deltas. `~` prefix means the change is within noise (CV threshold). CV requires multiple [BenchmarkDotNet](https://benchmarkdotnet.org/) iterations (controlled by `--runs` in bench_compare).
-
+>
 > **Why best-of-N instead of median?** On a non-isolated machine, run-to-run noise is typically 6--30%. The median includes runs degraded by OS scheduling jitter, thermal throttling, and background I/O. Best-of-N (maximum throughput) represents what the hardware *can* achieve and is more stable across sessions. CV is reported alongside so you can judge measurement quality -- if CV is high, the environment was noisy and even the best-of-N value should be taken with a grain of salt.
 
 ### [llama.cpp](https://github.com/ggerganov/llama.cpp) setup

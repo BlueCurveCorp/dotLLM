@@ -72,28 +72,7 @@ public static class ServerStartup
 
         var threading = new ThreadingConfig(options.Threads, options.DecodeThreads);
 
-        int gpuLayers = options.GpuLayers.HasValue
-            ? Math.Clamp(options.GpuLayers.Value, 0, config.NumLayers)
-            : options.Device.StartsWith("gpu", StringComparison.OrdinalIgnoreCase) ? config.NumLayers : 0;
-
-        IModel model;
-        if (gpuLayers <= 0)
-        {
-            Console.WriteLine($"[dotllm] CPU inference ({threading.EffectiveThreadCount} threads)");
-            model = TransformerModel.LoadFromGguf(gguf, config, threading);
-        }
-        else if (gpuLayers >= config.NumLayers)
-        {
-            int gpuId = ParseGpuId(options.Device);
-            Console.WriteLine($"[dotllm] GPU {gpuId} inference");
-            model = DotLLM.Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
-        }
-        else
-        {
-            int gpuId = ParseGpuId(options.Device);
-            Console.WriteLine($"[dotllm] Hybrid inference ({gpuLayers} GPU + {config.NumLayers - gpuLayers} CPU layers)");
-            model = DotLLM.Cuda.HybridTransformerModel.LoadFromGguf(gguf, config, gpuLayers, gpuId, threading);
-        }
+        IModel model = ModelLoader.Load(gguf, config, options.Device, options.GpuLayers, threading);
 
         // Create chat template
         string bosToken = tokenizer.DecodeToken(tokenizer.BosTokenId);
@@ -124,11 +103,23 @@ public static class ServerStartup
                 ? (cfg, size) => cudaModel.CreateKvCache(size, kvConfig)
                 : (cfg, size) => cudaModel.CreateKvCache(size);
         }
-        else if (model is DotLLM.Cuda.HybridTransformerModel hybridModel)
+        else if (model is DotLLM.Cuda.HybridTransformerModel hybridCudaModel)
         {
             if (options.UsePaged)
-                Console.WriteLine("[dotllm] Paged KV-cache not supported with hybrid GPU, using hybrid cache.");
-            kvFactory = (cfg, size) => hybridModel.CreateKvCache(size);
+                Console.WriteLine("[dotllm] Paged KV-cache not supported with CUDA hybrid, using simple hybrid cache.");
+            kvFactory = (cfg, size) => hybridCudaModel.CreateKvCache(size);
+        }
+        else if (model is DotLLM.RoCm.HipTransformerModel rocmModel)
+        {
+            if (options.UsePaged)
+                Console.WriteLine("[dotllm] Paged KV-cache not supported with ROCm, using GPU cache.");
+            kvFactory = (cfg, size) => rocmModel.CreateKvCache(size);
+        }
+        else if (model is DotLLM.RoCm.HipHybridTransformerModel hybridRocmModel)
+        {
+            if (options.UsePaged)
+                Console.WriteLine("[dotllm] Paged KV-cache not supported with ROCm hybrid, using simple hybrid cache.");
+            kvFactory = (cfg, size) => hybridRocmModel.CreateKvCache(size);
         }
         else if (options.UsePaged && !kvConfig.IsQuantized)
         {
@@ -243,8 +234,4 @@ public static class ServerStartup
         return app;
     }
 
-    private static int ParseGpuId(string device) =>
-        device.IndexOf(':') is int ci and > 0
-            ? int.Parse(device.AsSpan(ci + 1))
-            : 0;
 }

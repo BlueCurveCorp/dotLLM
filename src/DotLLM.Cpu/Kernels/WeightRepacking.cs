@@ -39,6 +39,7 @@ public static unsafe class WeightRepacking
         /// <summary>Total allocated bytes.</summary>
         public readonly long AllocatedBytes;
 
+        /// <summary>Initializes a new instance of the <see cref="RepackedWeight"/> struct.</summary>
         public RepackedWeight(nint ptr, int fullGroupCount, int tailRows,
                               int blocksPerRow, int blockBytes, long allocatedBytes)
         {
@@ -64,6 +65,7 @@ public static unsafe class WeightRepacking
             get => (byte*)Ptr + (long)FullGroupCount * InterleaveFactor * RowBytes;
         }
 
+        /// <summary>Frees the aligned native memory.</summary>
         public void Dispose()
         {
             if (Ptr != 0)
