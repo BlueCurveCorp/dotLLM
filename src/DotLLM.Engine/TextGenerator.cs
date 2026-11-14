@@ -27,6 +27,7 @@ namespace DotLLM.Engine;
 public sealed partial class TextGenerator
 {
     private readonly IModel _model;
+    private readonly int _deviceId;
     private readonly ITokenizer _tokenizer;
     private readonly Func<ModelConfig, int, Core.Attention.IKvCache>? _kvCacheFactory;
     private readonly PrefixCache? _prefixCache;
@@ -259,6 +260,7 @@ public sealed partial class TextGenerator
     /// <param name="prefixCacheHeadroomTokens">Extra positions a KV-cache that will be handed to <paramref name="prefixCache"/> is allocated
     /// with, so the next (longer) turn of the same conversation still fits it and reuses its prefix instead of missing on size
     /// (issue #1591). Device caches cannot grow in place, so this is the only slack; 0 (default) allocates exactly prompt + max tokens.</param>
+    /// <param name="deviceId">Target model's device ordinal. The default -1 preserves existing CPU/backend routing.</param>
     public TextGenerator(IModel model, ITokenizer tokenizer,
                           Func<ModelConfig, int, Core.Attention.IKvCache>? kvCacheFactory = null,
                           PrefixCache? prefixCache = null,
@@ -273,13 +275,15 @@ public sealed partial class TextGenerator
                           bool recurrentPrefixCache = false,
                           RecurrentPrefixCacheOptions? recurrentPrefixCacheOptions = null,
                           PromptLookupOptions? promptLookup = null,
-                          int prefixCacheHeadroomTokens = 0)
+                          int prefixCacheHeadroomTokens = 0,
+                          int deviceId = -1)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(prefixCacheHeadroomTokens);
         _prefixCacheHeadroomTokens = prefixCacheHeadroomTokens;
         promptLookup?.Validate();
         _promptLookup = promptLookup;
         _model = model;
+        _deviceId = deviceId;
         _tokenizer = tokenizer;
         _kvCacheFactory = kvCacheFactory;
         _prefixCache = prefixCache;
@@ -638,7 +642,7 @@ public sealed partial class TextGenerator
                 else if (promptLen > 0)
                 {
                     // 100% cache hit — re-forward last prompt token to get logits
-                    using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], deviceId: -1, kvCache, adapter))
+                    using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], _deviceId, kvCache, adapter))
                     {
                         long ts1 = EngineClock.GetTimestamp();
                         prefillTicks = ts1 - ts0;
@@ -936,7 +940,7 @@ public sealed partial class TextGenerator
                     int nextTokenId;
 
                     long fwdStart = EngineClock.GetTimestamp();
-                    using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache, adapter))
+                    using (ITensor logits = _model.Forward([lastToken], [pos], _deviceId, kvCache, adapter))
                     {
                         decodeTicks += EngineClock.GetTimestamp() - fwdStart;
 
@@ -1214,7 +1218,7 @@ public sealed partial class TextGenerator
                 else if (promptLen > 0)
                 {
                     // 100% cache hit — re-forward last prompt token to get logits
-                    using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], deviceId: -1, kvCache, adapter))
+                    using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], _deviceId, kvCache, adapter))
                     {
                         long ts1 = EngineClock.GetTimestamp();
                         prefillTicks = ts1 - ts0;
@@ -1519,7 +1523,7 @@ public sealed partial class TextGenerator
                     TokenLogprobInfo? tokenLogprob;
 
                     long fwdStart = EngineClock.GetTimestamp();
-                    using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache, adapter))
+                    using (ITensor logits = _model.Forward([lastToken], [pos], _deviceId, kvCache, adapter))
                     {
                         decodeTicks += EngineClock.GetTimestamp() - fwdStart;
 
@@ -2449,7 +2453,7 @@ public sealed partial class TextGenerator
                 // ignore the hint keep returning [len, vocab] and both call sites index
                 // Shape[0]-1, so the behaviour is unchanged for them.
                 logits = _model.Forward(promptIds.AsSpan(prefillStart + offset, len), positions,
-                    deviceId: -1, kvCache, adapter, mtpState, lastTokenLogitsOnly: true);
+                    _deviceId, kvCache, adapter, mtpState, lastTokenLogitsOnly: true);
                 offset += len;
 
                 // Forward returned host logits, so the device has finished this chunk: count completed work, not queued.
