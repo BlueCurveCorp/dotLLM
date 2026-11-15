@@ -262,6 +262,20 @@ public sealed unsafe class GdnStateCache : IGdnState
         else { srcConv = default; srcGdn = default; }
     }
 
+    /// <summary>
+    /// Read-only view of layer <paramref name="gdnLayerIndex"/>'s logical conv and matrix state: the source's buffers while the layer is
+    /// still a pending lazy copy, else the live ones. Never materialises, never clears a pending mark, never writes: the Clover block
+    /// preview (#1815) reads the committed state through this and must leave it exactly as it found it.
+    /// </summary>
+    public void GetStateForRead(int gdnLayerIndex, out ReadOnlySpan<float> conv, out ReadOnlySpan<float> gdn)
+    {
+        ThrowIfDisposed();
+        if ((uint)gdnLayerIndex >= (uint)_numGdnLayers) throw new ArgumentOutOfRangeException(nameof(gdnLayerIndex));
+        var owner = _pendingCount != 0 && _pending![gdnLayerIndex] ? _pendingSource! : this;
+        conv = new ReadOnlySpan<float>((float*)owner._convState + (long)gdnLayerIndex * _convStateElements, _convStateElements);
+        gdn = new ReadOnlySpan<float>((float*)owner._gdnState + (long)gdnLayerIndex * _gdnStateElements, _gdnStateElements);
+    }
+
     /// <summary>Live conv state of a layer for a write (after <see cref="BeginUpdate"/>); never materialises.</summary>
     public Span<float> GetConvStateForUpdate(int gdnLayerIndex)
         => new((float*)_convState + (long)gdnLayerIndex * _convStateElements, _convStateElements);
