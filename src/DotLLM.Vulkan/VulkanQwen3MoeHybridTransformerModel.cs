@@ -409,6 +409,7 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
             kvSlotForLayer, attentionLayerCount, gdnLayerOrdinal,
             ropeDim, ropeTheta, ResolveNCpuMoeLayers(nCpuMoeLayers));
         model._iqF16Prefill = CreateIqF16Prefill(device, spvDir, config, kernels);
+        model._cloverSpvDir = spvDir;   // #1815: the block-preview kernels load lazily on the first preview
         try
         {
             model.UploadResidentMoeBanks();   // #1224: at load, not inside the first forward
@@ -521,6 +522,7 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
             kvSlotForLayer, attentionLayerCount, gdnLayerOrdinal,
             ropeDim, ropeTheta, ResolveNCpuMoeLayers(nCpuMoeLayers));
         model._iqF16Prefill = CreateIqF16Prefill(device, spvDir, config, kernels);
+        model._cloverSpvDir = spvDir;   // #1815: the block-preview kernels load lazily on the first preview
         return model;
     }
 
@@ -1201,7 +1203,7 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
     private unsafe void RecordFullAttnLayer(
         nint cmdBuf, int absoluteLayerIdx, VulkanQwen3MoeHybridWeights.FullAttnLayerBuffers attnW,
         int seqLen, ReadOnlySpan<int> positions,
-        int numHeads, int numKvHeads, int headDim, IKvCache? kvCache)
+        int numHeads, int numKvHeads, int headDim, IKvCache? kvCache, bool bidirectionalBlock = false)
     {
         int qElems = numHeads * headDim;
         int qgElems = 2 * qElems;
@@ -1301,7 +1303,7 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
 
         // qwen4exp QSA hook (#819): maintains the indexer key cache and, past the dense limit, replaces the dense dispatch below.
         // Null for every other architecture and for the MTP draft head, so their path is untouched.
-        bool hookHandled = Q4AttentionHook is { } hook && kvCache is VulkanNemotronHKvCache
+        bool hookHandled = !bidirectionalBlock && Q4AttentionHook is { } hook && kvCache is VulkanNemotronHKvCache
             && hook.RecordAttention(cmdBuf, absoluteLayerIdx, seqLen, positions, kSrc, vSrc, ((VulkanNemotronHKvCache)kvCache).Storage);
 
         if (!hookHandled && kvCache is VulkanNemotronHKvCache { Storage: not VulkanKvStorage.F32 })
@@ -1311,6 +1313,14 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
         if (hookHandled)
         {
             // AttnOutput written by the hook.
+        }
+        else if (bidirectionalBlock)
+        {
+            // Clover block preview (#1815): every block row attends the whole prefix and the whole block.
+            _kernels.Attention.Record(cmdBuf, _state.Q, kSrc, vSrc, _state.AttnOutput,
+                seqQ: seqLen, seqKv: seqKv,
+                numHeads: numHeads, numKvHeads: numKvHeads, headDim: headDim,
+                positionOffset: positionOffset, slidingWindow: 0, maskMode: AttentionMaskMode.Bidirectional);
         }
         else if (_kernels.SplitKvAttention is not null && seqLen == 1
             && headDim <= VulkanSplitKvAttentionKernel.MaxHeadDim
@@ -1445,7 +1455,7 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
     private void RecordMoeHybridTokenMixing(
         nint cmdBuf, int layer, in VulkanQwen3MoeHybridWeights.LayerBuffers layerBuf, HybridLayerKind[] kinds,
         int seqLen, int hiddenSize, float eps, ReadOnlySpan<int> positions, VulkanGdnStateCache gdnCache, IKvCache? kvCache,
-        int numHeads, int numKvHeads, int headDim)
+        int numHeads, int numKvHeads, int headDim, bool cloverPreview = false)
     {
 
         // Snapshot hidden → residual (HiddenState aliases the residual slot
@@ -1461,7 +1471,11 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
         KernelSupport.ComputeToComputeBarrier(cmdBuf);
         TmStage("tm_copy_norm", seqLen);
 
-        if (kinds[layer] == HybridLayerKind.GatedDeltaNet)
+        if (cloverPreview && kinds[layer] == HybridLayerKind.GatedDeltaNet)
+        {
+            RecordGdnPreviewLayer(cmdBuf, layer, layerBuf.Gdn!.Value, seqLen, eps, gdnCache);   // #1815: reads the state, never writes it
+        }
+        else if (kinds[layer] == HybridLayerKind.GatedDeltaNet)
         {
             RecordGdnLayer(cmdBuf, layer, layerBuf.Gdn!.Value, seqLen, eps, gdnCache,
                 snap: _rowSnaps is { Rows: > 0 } rs && ReferenceEquals(gdnCache, _gdnCache) ? rs : null);   // #1188 verify row snapshots
@@ -1469,7 +1483,7 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
         else
         {
             RecordFullAttnLayer(cmdBuf, layer, layerBuf.Attention!.Value, seqLen, positions,
-                numHeads, numKvHeads, headDim, kvCache);
+                numHeads, numKvHeads, headDim, kvCache, bidirectionalBlock: cloverPreview);
         }
         KernelSupport.ComputeToComputeBarrier(cmdBuf);
         TmStage(kinds[layer] == HybridLayerKind.GatedDeltaNet ? "tm_gdn_total" : "tm_attn_total", seqLen);
@@ -3373,6 +3387,7 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
         _weights.Dispose();
         _gdnCache.Dispose();
         _iqF16Prefill?.Dispose();
+        DisposeCloverPreview();
         _kernels.Dispose();
         // Disposing the CPU model frees its NormWeight / DequantizeF32 native
         // allocations and detaches it from the GgufFile. The GgufFile itself
