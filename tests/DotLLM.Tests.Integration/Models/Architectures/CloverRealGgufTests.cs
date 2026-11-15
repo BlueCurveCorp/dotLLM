@@ -80,6 +80,7 @@ internal static class CloverRealGguf
 /// The sensitivity arm reloads the file without the Clover sidecar, i.e. reads <c>ssm_a</c> (which this file stores as the raw
 /// <c>A_log</c>) as qwen35moe's <c>-exp(A_log)</c>: that model emits garbage, so the gate provably sees the transform.
 /// </summary>
+[Collection(GpuCollection.Name)] // #483 guard: this file references DotLLM.Vulkan; a 35B load should serialize anyway
 public sealed class CloverRealGgufCpuTests
 {
     private readonly ITestOutputHelper _output;
