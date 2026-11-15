@@ -231,7 +231,7 @@ public sealed class CloverRealGgufVulkanTests
         return (kl / n, (double)agree / n);
     }
 
-    private static string? ResolveSpvDir()
+    internal static string? ResolveSpvDir()
     {
         string? probe = AppContext.BaseDirectory;
         for (int i = 0; i < 8 && probe is not null; i++)
