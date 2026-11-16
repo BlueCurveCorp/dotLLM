@@ -417,6 +417,9 @@ extern "C" __global__ void __launch_bounds__(256) attention_f16_paged(
     // #1839: this tile's block pointers, staged once per tile (TILE_KV + 1 entries covers
     // block_size = 1). Offset (2*head_dim + TILE_KV + 32) floats is 8-byte aligned for even
     // head_dim. CudaKernels.LaunchAttentionPaged sizes the dynamic shared memory to match.
+    // K/V rows are then read with __ldg: a pointer that came out of shared memory is a generic
+    // pointer, and without __ldg the row loads lost the read-only global path (measured slower
+    // on an RTX 3060 than loading the pointer from global per block run).
     const half** tile_kptr = (const half**)(warp_scratch + 32);
     const half** tile_vptr = tile_kptr + (TILE_KV + 1);
 
@@ -480,7 +483,7 @@ extern "C" __global__ void __launch_bounds__(256) attention_f16_paged(
 
             float score = 0.0f;
             for (int d = 0; d < head_dim; d++)
-                score += q_shared[d] * __half2float(k_vec[d]);
+                score += q_shared[d] * __half2float(__ldg(&k_vec[d]));
 
             score_tile[t] = score * scale;
         }
@@ -568,7 +571,7 @@ extern "C" __global__ void __launch_bounds__(256) attention_f16_paged(
                 {
                     float w = score_tile[t + i];
                     if (w > 0.0f)
-                        v_acc += w * __half2float(v_run[(size_t)i * kv_stride]);
+                        v_acc += w * __half2float(__ldg(&v_run[(size_t)i * kv_stride]));
                 }
                 t += run;
                 offset_in_block = 0;
