@@ -529,19 +529,24 @@ extern "C" __global__ void __launch_bounds__(256) attention_f16_paged(
         running_sum += warp_scratch[0];
 
         // 2e. Accumulate weighted V — same block-table indirection as the K read above.
+        // #1839: walk the blocks incrementally instead of a runtime-divisor div/mod plus a
+        // dependent block-pointer load on EVERY one of the tile's serial iterations; the
+        // pointer is now reloaded once per block_size tokens. Same accumulation order, so the
+        // output stays bit-identical to attention_f16.
         for (int d = threadIdx.x; d < head_dim; d += blockDim.x)
         {
             float v_acc = 0.0f;
+            int logical_block = t_start / block_size;
+            int offset_in_block = t_start - logical_block * block_size;
+            const half* v_block = v_block_ptrs[logical_block] + hkv * head_dim + d;
             for (int t = 0; t < tile_len; t++)
             {
                 if (score_tile[t] > 0.0f)
+                    v_acc += score_tile[t] * __half2float(v_block[(size_t)offset_in_block * kv_stride]);
+                if (++offset_in_block == block_size && t + 1 < tile_len)
                 {
-                    int tkv = t_start + t;
-                    int logical_block = tkv / block_size;
-                    int offset_in_block = tkv % block_size;
-                    const half* v_block = v_block_ptrs[logical_block];
-                    const half* v_vec = v_block + (size_t)offset_in_block * kv_stride + hkv * head_dim;
-                    v_acc += score_tile[t] * __half2float(v_vec[d]);
+                    offset_in_block = 0;
+                    v_block = v_block_ptrs[++logical_block] + hkv * head_dim + d;
                 }
             }
             out_accum[d] += v_acc;
