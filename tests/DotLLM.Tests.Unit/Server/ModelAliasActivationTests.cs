@@ -27,6 +27,7 @@ public sealed class ModelAliasActivationTests : IDisposable
     private readonly List<ServerState> _states = new();
     private readonly string _path;
     private readonly string _otherPath;
+    private readonly string _q8Path;
     private int _loads;
 
     public ModelAliasActivationTests()
@@ -38,6 +39,7 @@ public sealed class ModelAliasActivationTests : IDisposable
         Environment.SetEnvironmentVariable("HF_HUB_CACHE", Path.Combine(_root, "hub"));
         _path = WriteGguf(Repo, Stem + ".gguf");
         _otherPath = WriteGguf("acme/Other-GGUF", OtherStem + ".gguf");
+        _q8Path = WriteGguf(Repo, "tiny-Q8_0.gguf");   // a second quant in the same repo: the repo id alone resolves to Q4_K_M
     }
 
     public void Dispose()
@@ -182,6 +184,24 @@ public sealed class ModelAliasActivationTests : IDisposable
         ModelProfileStore.Save(Stem, new ModelProfile { From = _path });
         Assert.False(state.IsActiveModel(Stem));
         Assert.True(state.IsActiveModel(state.Options.ModelId));   // the id itself still names it
+    }
+
+    /// <summary>
+    /// <c>dotllm serve acme/Tiny-GGUF --quant Q8_0</c>: the repo id alone resolves to another quant, so only the served-as argument says
+    /// that a request for <c>acme/Tiny-GGUF</c> means the Q8_0 model already loaded - it must not swap to the Q4_K_M.
+    /// </summary>
+    [Fact]
+    public async Task ServedAsRepoWithQuant_RepoIdHitsTheServedQuant()
+    {
+        var state = NewState();
+        Assert.Null(await state.EnsureActiveAsync(_q8Path, null, CancellationToken.None));
+        state.Options = state.Options with { Model = Repo, Quant = "Q8_0" };   // what `serve <repo> --quant Q8_0` stores
+        var model = state.Model;
+
+        Assert.Null(await state.EnsureActiveAsync(Repo, null, CancellationToken.None));
+        Assert.Equal(1, _loads);
+        Assert.Same(model, state.Model);
+        Assert.Equal(_q8Path, state.LoadedModelPath);
     }
 
     /// <summary>The residency lookup matches aliases too: a stashed model requested by its short id is reactivated, not reloaded.</summary>
