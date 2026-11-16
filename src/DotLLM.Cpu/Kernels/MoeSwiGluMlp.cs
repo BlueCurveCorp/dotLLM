@@ -228,6 +228,11 @@ public static unsafe partial class MoeSwiGluMlp
     /// <param name="selectionBias">Optional per-expert bias added to the sigmoid scores for top-k SELECTION only (<c>exp_probs_b</c>); gating weights stay unbiased.</param>
     /// <param name="weightsScale">Multiplier applied to the final (optionally renormalised) top-k weights (<c>expert_weights_scale</c>).</param>
     /// <param name="pool">Optional pool for the router logits (split over experts, same per-row dot, so bit-identical to serial).</param>
+    /// <param name="blockCoresetTopP">
+    /// Clover's block expert coreset (#1828): when in (0, 1], the router logits of all <paramref name="seqLen"/> rows are restricted to
+    /// one shared expert subset before softmax/top-k (<see cref="ApplyBlockCoreset"/>). 0 (the default) = off; every causal caller passes
+    /// nothing, so its routing is unchanged.
+    /// </param>
     /// <returns>Number of unique experts actually used (the valid prefix length of <paramref name="uniqueExperts"/>).</returns>
     public static int Route(
         ReadOnlySpan<float> hidden,
@@ -245,7 +250,8 @@ public static unsafe partial class MoeSwiGluMlp
         bool sigmoidGating = false,
         ReadOnlySpan<float> selectionBias = default,
         float weightsScale = 1.0f,
-        ComputeThreadPool? pool = null)
+        ComputeThreadPool? pool = null,
+        float blockCoresetTopP = 0f)
     {
         if (numExperts <= 0) throw new ArgumentOutOfRangeException(nameof(numExperts));
         if (numExpertsPerTok <= 0 || numExpertsPerTok > numExperts)
@@ -299,6 +305,10 @@ public static unsafe partial class MoeSwiGluMlp
                     }
                 }
             }
+
+            // ── 1b) Clover block expert coreset (preview forwards only, #1828) ──
+            if (blockCoresetTopP > 0f)
+                ApplyBlockCoreset(gateLogitsBuf.AsSpan(0, seqLen * numExperts), seqLen, numExperts, numExpertsPerTok, blockCoresetTopP);
 
             // ── 2) Per-token softmax + top-k + (optional) renormalise ─────────
             for (int t = 0; t < seqLen; t++)
@@ -1520,6 +1530,86 @@ public static unsafe partial class MoeSwiGluMlp
             }
 
             acc.CopyTo(new Span<float>(outPtr + (long)t * hiddenSize, hiddenSize));
+        }
+    }
+
+    /// <summary>
+    /// Clover's block expert coreset (DiffuSpace <c>modeling_clover_moe.coreset_torch</c>, #1828): restricts every row of a preview block
+    /// to one shared expert subset, in place on the router logits <c>[rows, numExperts]</c>, before the ordinary softmax + top-k.
+    /// </summary>
+    /// <remarks>
+    /// Per row: the top-<paramref name="topK"/> experts by logit (stable: lower index first on ties) and their full-softmax probabilities
+    /// are summed into a per-expert mass. The masses are normalised and sorted descending (stable), and an expert is kept while the mass
+    /// strictly before it is below <paramref name="topP"/> (the first is always kept). Every other expert's logit is set to <c>-inf</c> in
+    /// every row. When fewer than <paramref name="topK"/> experts survive, the top-k that follows fills the remaining slots with
+    /// zero-probability experts, which contribute nothing, as in HF (whose argsort also returns <c>-inf</c> entries there). The float
+    /// operation order follows HF (row-major scatter-add, then <c>cumsum - p</c>). Scratch: <c>numExperts</c> floats, ints and bools plus
+    /// the per-row top-k, on the stack up to 256 experts.
+    /// </remarks>
+    [SkipLocalsInit]
+    public static void ApplyBlockCoreset(Span<float> logits, int rows, int numExperts, int topK, float topP)
+    {
+        if (rows <= 0) return;
+        if (numExperts <= 0 || topK <= 0 || topK > numExperts) throw new ArgumentOutOfRangeException(nameof(topK));
+        if (!(topP > 0f && topP <= 1f)) throw new ArgumentOutOfRangeException(nameof(topP), "The coreset top_p must be in (0, 1].");
+        if (logits.Length < rows * numExperts) throw new ArgumentException("logits too small", nameof(logits));
+
+        bool small = numExperts <= 256;
+        float[]? rentedF = small ? null : ArrayPool<float>.Shared.Rent(numExperts);
+        int[]? rentedI = small ? null : ArrayPool<int>.Shared.Rent(numExperts);
+        Span<float> totals = small ? stackalloc float[numExperts] : rentedF.AsSpan(0, numExperts);
+        Span<int> order = small ? stackalloc int[numExperts] : rentedI.AsSpan(0, numExperts);
+        Span<bool> keep = small ? stackalloc bool[numExperts] : new bool[numExperts];
+        Span<int> topIdx = stackalloc int[topK];
+        Span<float> topVal = stackalloc float[topK];
+        try
+        {
+            totals.Clear();
+            for (int r = 0; r < rows; r++)
+            {
+                var row = logits.Slice(r * numExperts, numExperts);
+                float max = float.NegativeInfinity;
+                for (int e = 0; e < numExperts; e++) max = MathF.Max(max, row[e]);
+                float sum = 0f;
+                for (int e = 0; e < numExperts; e++) sum += MathF.Exp(row[e] - max);
+                SelectTopK(row, topIdx, topVal);
+                for (int s = 0; s < topK; s++)
+                    totals[topIdx[s]] += MathF.Exp(topVal[s] - max) / sum;
+            }
+
+            float total = 0f;
+            for (int e = 0; e < numExperts; e++) total += totals[e];
+            float denom = MathF.Max(total, 1e-9f);
+            for (int e = 0; e < numExperts; e++) { totals[e] /= denom; order[e] = e; }
+
+            // Stable descending insertion sort by mass (numExperts is small: 8..256).
+            for (int i = 1; i < numExperts; i++)
+            {
+                int cur = order[i];
+                float v = totals[cur];
+                int j = i - 1;
+                while (j >= 0 && totals[order[j]] < v) { order[j + 1] = order[j]; j--; }
+                order[j + 1] = cur;
+            }
+
+            float cum = 0f;
+            for (int i = 0; i < numExperts; i++)
+            {
+                float p = totals[order[i]];
+                cum += p;
+                keep[order[i]] = i == 0 || (cum - p) < topP;
+            }
+            for (int r = 0; r < rows; r++)
+            {
+                var row = logits.Slice(r * numExperts, numExperts);
+                for (int e = 0; e < numExperts; e++)
+                    if (!keep[e]) row[e] = float.NegativeInfinity;
+            }
+        }
+        finally
+        {
+            if (rentedF is not null) ArrayPool<float>.Shared.Return(rentedF);
+            if (rentedI is not null) ArrayPool<int>.Shared.Return(rentedI);
         }
     }
 

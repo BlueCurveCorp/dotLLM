@@ -251,15 +251,212 @@ def write_gguf(model, c, path: Path) -> None:
     w.close()
 
 
+# ── Stage 4 (#1828): LowConfidence block-diffusion generation oracle ───────────────────────────────────────────────────────────────
+# The generation fixture is the preview fixture's weights (same seed) with two changes that make the tests able to fail:
+#  * lm_head scaled up, so top-1 confidences straddle the 0.95 threshold (with the stage-3 scale every step is a single fallback
+#    fill, and a wrong-threshold mutant would be invisible);
+#  * router gate scaled up, so the block expert coreset (on, top_p 0.9, as the official config) actually drops experts.
+GEN_LM_SCALE = 8.0
+GEN_ROUTER_SCALE = 3.0
+GEN_THRESHOLD = 0.95
+GEN_PENALTIES_OFF = dict(presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0,
+                         dllm_length_penalty=0.0, dllm_think_end_bias=0.0)
+
+
+def mirror_generate(model, c, prompt, max_new, threshold, block_size, eos_ids):
+    """HF ``CloverMoeModelLM.generate`` (greedy, penalties off) re-stated step by step so the per-step fill order can be recorded.
+    The committed ids are asserted equal to HF's own ``generate`` by the caller."""
+    mask = c.mask_token_id
+    cache = model.model(torch.tensor([prompt]), use_cache=True).past_key_values
+    response, blocks, stopped = [], [], False
+    while len(response) < max_new and not stopped:
+        remaining = min(block_size, max_new - len(response))
+        block = torch.full((1, block_size), mask, dtype=torch.long)
+        valid = torch.ones_like(block, dtype=torch.bool)
+        pending = valid.clone()
+        steps = []
+        for _ in range(block_size):
+            logits = model(block, attention_mask=valid, past_key_values=cache, use_cache=True, preview=True).logits[0].float()
+            logits[:, mask] = -float("inf")
+            prediction = logits.argmax(-1)
+            confidence = logits.softmax(-1).gather(-1, prediction[:, None]).squeeze(-1)
+            confidence = confidence.masked_fill(~pending[0], -float("inf"))
+            transfer = (confidence > threshold) & pending[0]
+            fallback = not bool(transfer.any())
+            if fallback:
+                transfer[confidence.argmax()] = True
+            # Margins that decide whether a faithful re-implementation can flip: the threshold distance over the pending rows, the
+            # top-1/top-2 logit gap of the rows filled, and (fallback) the gap between the best and second-best pending confidence.
+            pend = pending[0]
+            top2 = logits.topk(2, -1).values
+            filled = transfer.nonzero().flatten().tolist()
+            conf_p = confidence[pend]
+            srt = conf_p.sort(descending=True).values
+            steps.append({
+                "filled": filled,
+                "tokens": [int(prediction[i]) for i in filled],
+                "fallback": fallback,
+                "min_threshold_gap": float((conf_p - threshold).abs().min()),
+                "min_logit_margin": float(min(top2[i, 0] - top2[i, 1] for i in filled)),
+                "fallback_conf_gap": float(srt[0] - srt[1]) if fallback and srt.numel() > 1 else None,
+            })
+            block[0, transfer] = prediction[transfer]
+            pending[0, transfer] = False
+            if not bool(pending.any()):
+                break
+        assert not bool(pending.any())
+        new = block[0, :remaining]
+        committed = []
+        for token in new.tolist():
+            response.append(token)
+            committed.append(token)
+            if token in eos_ids:
+                stopped = True
+                break
+        blocks.append({"block": block[0].tolist(), "committed": committed, "steps": steps})
+        if len(response) < max_new and not stopped:
+            cache = model.model(new.view(1, -1), past_key_values=cache, use_cache=True).past_key_values
+    return response, blocks
+
+
+def generate_oracle(Config, ModelLM, args, out: Path) -> None:
+    import clover_hf.modeling_clover_moe as mdl
+
+    cfg = dict(CFG, moe_block_coreset_enabled=True, moe_block_coreset_top_p=0.9,
+               denoising_config={"algorithm": "low_confidence", "threshold": GEN_THRESHOLD})
+    torch.set_grad_enabled(False)
+    c = Config(**cfg)
+    model = ModelLM(c).float().eval()
+    gen = torch.Generator().manual_seed(args.seed)
+    randomise(model, c, gen)
+    with torch.no_grad():
+        model.lm_head.weight.mul_(args.lm_scale)
+        for layer in model.model.layers:
+            layer.mlp.gate.weight.mul_(args.router_scale)
+    write_gguf(model, c, out / "clover-generate-tiny.gguf")
+
+    # Coreset observability: how many experts each preview MoE call keeps (all 8 kept everywhere = an inert coreset).
+    kept = []
+    real_coreset = mdl.coreset_torch
+
+    def counting_coreset(logits, valid, top_k, top_p):
+        masked = real_coreset(logits, valid, top_k, top_p)
+        kept.append(int(torch.isfinite(masked[0, 0]).sum()))
+        return masked
+    mdl.coreset_torch = counting_coreset
+
+    def with_coreset(enabled, top_p, fn):
+        c.moe_block_coreset_enabled, c.moe_block_coreset_top_p = enabled, top_p
+        try:
+            return fn()
+        finally:
+            c.moe_block_coreset_enabled, c.moe_block_coreset_top_p = True, 0.9
+
+    rng = np.random.default_rng(args.seed + 1)
+    def ids(n):
+        return [int(x) for x in rng.integers(3, 480, size=n)]
+
+    def trace(bs):
+        return [[s["filled"] for s in b["steps"]] for b in bs]
+
+    cases = []
+    base_specs = [
+        ("p10_n80", ids(10), 80, GEN_THRESHOLD, 32),
+        ("p3_n70", ids(3), 70, GEN_THRESHOLD, 32),
+        ("p17_n40_b8", ids(17), 40, GEN_THRESHOLD, 8),
+    ]
+    for name, prompt, max_new, threshold, block_size in base_specs:
+        for eos_case in (False, True):
+            eos = [c.eos_token_id]
+            if eos_case:
+                # A stop token that first appears mid-block (not in the first block) in the eos-free run, re-run as an extra EOS id.
+                free, _ = mirror_generate(model, c, prompt, max_new, threshold, block_size, eos)
+                cand = [t for i, t in enumerate(free) if i >= block_size and i % block_size not in (0, block_size - 1)
+                        and t not in free[:i] and t != c.eos_token_id]
+                if not cand:
+                    continue
+                eos = [c.eos_token_id, cand[0]]
+            kept.clear()
+            resp, blocks = mirror_generate(model, c, prompt, max_new, threshold, block_size, eos)
+            kept_counts = list(kept)
+            seq = model.generate(torch.tensor([prompt]), max_new_tokens=max_new, do_sample=False, threshold=threshold,
+                                 block_size=block_size, eos_token_id=eos, pad_token_id=0, **GEN_PENALTIES_OFF)
+            hf = seq[0, len(prompt):].tolist()
+            assert hf == resp, f"{name}: mirror {resp} != HF generate {hf}"
+            # Substitutions (the mutants, applied to the reference itself): each must change the committed ids or the fill trace.
+            subs = {}
+            for sub, enabled, top_p, th in (("coreset_off", False, 0.9, threshold), ("top_p_0.7", True, 0.7, threshold),
+                                            ("threshold_0.9", True, 0.9, 0.9)):
+                r2, b2 = with_coreset(enabled, top_p, lambda: mirror_generate(model, c, prompt, max_new, th, block_size, eos))
+                subs[sub] = {"ids_differ": r2 != resp, "trace_differs": trace(b2) != trace(blocks)}
+            steps = [s for b in blocks for s in b["steps"]]
+            summary = {
+                "steps": len(steps),
+                "fallback_steps": sum(s["fallback"] for s in steps),
+                "multi_fill_steps": sum(len(s["filled"]) > 1 for s in steps),
+                "min_threshold_gap": min(s["min_threshold_gap"] for s in steps),
+                "min_logit_margin": min(s["min_logit_margin"] for s in steps),
+                "min_fallback_conf_gap": min((s["fallback_conf_gap"] for s in steps if s["fallback_conf_gap"] is not None), default=None),
+                "coreset_kept_min": min(kept_counts), "coreset_kept_max": max(kept_counts),
+                "coreset_kept_mean": sum(kept_counts) / len(kept_counts),
+            }
+            case = {"name": name + ("_eos" if eos_case else ""), "prompt": prompt, "max_new_tokens": max_new, "threshold": threshold,
+                    "block_size": block_size, "eos_token_ids": eos, "response": resp, "blocks": blocks, "summary": summary,
+                    "substitutions": subs}
+            cases.append(case)
+            print(f"{case['name']}: {len(resp)} tokens, {summary}\n    subs {subs}")
+
+    # Coreset-on single previews (localize a coreset bug far better than end-to-end ids).
+    previews = []
+    mask = c.mask_token_id
+    for pname, prefix, block in (("prefix10_T32_allmask", base_specs[0][1], [mask] * 32),
+                                 ("prefix3_T32_half", base_specs[1][1], [mask if i % 2 else t for i, t in enumerate(ids(32))]),
+                                 ("prefix17_T8", base_specs[2][1], [mask, *ids(2), mask, mask, *ids(1), mask, mask])):
+        cache = model.model(torch.tensor([prefix]), use_cache=True).past_key_values
+        run = lambda: model(torch.tensor([block]), past_key_values=cache, use_cache=True, preview=True).logits[0].float().clone()
+        kept.clear()
+        lg = run()
+        kept_counts = list(kept)
+        lg_off = with_coreset(False, 0.9, run)
+        lg[:, mask] = float("-inf")
+        lg_off[:, mask] = float("-inf")
+        fin = torch.isfinite(lg)
+        delta = float((lg[fin] - lg_off[fin]).abs().max())
+        previews.append({"name": pname, "prefix": prefix, "block": block, "coreset_kept": kept_counts,
+                         "coreset_off_max_abs_delta": delta,
+                         "logits": [[(None if math.isinf(v) else round(v, 7)) for v in row] for row in lg.tolist()]})
+        print(f"preview {pname}: kept {kept_counts}, |coreset on - off| max {delta:.3f}")
+    mdl.coreset_torch = real_coreset
+
+    doc = {
+        "generator": "scripts/clover_preview_oracle.py --mode generate",
+        "seed": args.seed, "lm_scale": args.lm_scale, "router_scale": args.router_scale,
+        "hf_code": str(find_hf_code()), "torch": torch.__version__,
+        "config": cfg,
+        "mask_token_id": mask,
+        "cases": cases,
+        "previews": previews,
+    }
+    (out / "generate.json").write_text(json.dumps(doc))
+    print(f"wrote {out / 'clover-generate-tiny.gguf'} and {out / 'generate.json'}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", default=os.path.expanduser("~/.dotllm/test-cache/clover-preview-oracle"))
     ap.add_argument("--seed", type=int, default=1815)
+    ap.add_argument("--mode", choices=("preview", "generate"), default="preview",
+                    help="preview: the stage-3 preview oracle (#1815); generate: the stage-4 block-diffusion generation oracle (#1828)")
+    ap.add_argument("--lm-scale", type=float, default=GEN_LM_SCALE)
+    ap.add_argument("--router-scale", type=float, default=GEN_ROUTER_SCALE)
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
     Config, ModelLM = import_hf(find_hf_code(), out)
+    if args.mode == "generate":
+        generate_oracle(Config, ModelLM, args, out)
+        return
     torch.set_grad_enabled(False)
     c = Config(**CFG)
     model = ModelLM(c).float().eval()

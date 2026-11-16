@@ -1,0 +1,110 @@
+#version 450
+// Clover block expert coreset (#1828; DiffuSpace modeling_clover_moe.coreset_torch), in place on the router logits of one preview
+// block, before the ordinary moe_topk_softmax_f32. Mirrors DotLLM.Cpu.Kernels.MoeSwiGluMlp.ApplyBlockCoreset:
+//   for each row: top-k experts by logit (stable, lower index first on ties) add their full-softmax probability to a per-expert mass;
+//   masses normalised, sorted descending (stable); an expert is kept while the mass strictly before it is < top_p (the first always);
+//   every other expert's logit is masked in every row.
+// The mask value is a large finite negative (MASKED), not -inf: exp(MASKED - max) is 0 in the top-k softmax that follows on any
+// implementation, so the result equals the CPU's -inf mask.
+//
+// Dispatch: one workgroup of WG_SIZE threads, thread e owns expert e (numExperts <= WG_SIZE). Rows are looped (a preview block is
+// <= 64 rows). Scratch: shared memory only (3 x 256 floats + 256 uints).
+//
+// Buffer layout: logits [rows, numExperts] F32 row-major (read and written).
+
+#define WG_SIZE 256u
+#define MASKED  (-3.0e38)
+
+layout(local_size_x = WG_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer BufLogits { float logits[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint numExperts;
+    uint k;
+    float topP;
+} pc;
+
+shared float vals[WG_SIZE];
+shared float red[WG_SIZE];
+shared float sorted[WG_SIZE];
+shared uint  keepByRank[WG_SIZE];
+
+float reduceMax(float v) {
+    uint tid = gl_LocalInvocationID.x;
+    red[tid] = v;
+    barrier();
+    for (uint s = WG_SIZE / 2u; s > 0u; s >>= 1u) {
+        if (tid < s) red[tid] = max(red[tid], red[tid + s]);
+        barrier();
+    }
+    float r = red[0];
+    barrier();
+    return r;
+}
+
+float reduceSum(float v) {
+    uint tid = gl_LocalInvocationID.x;
+    red[tid] = v;
+    barrier();
+    for (uint s = WG_SIZE / 2u; s > 0u; s >>= 1u) {
+        if (tid < s) red[tid] += red[tid + s];
+        barrier();
+    }
+    float r = red[0];
+    barrier();
+    return r;
+}
+
+void main() {
+    uint e = gl_LocalInvocationID.x;
+    uint E = pc.numExperts;
+    bool live = e < E;
+    float total = 0.0;   // this thread's expert mass, accumulated over rows in row order (as the CPU / HF scatter-add)
+
+    for (uint r = 0u; r < pc.rows; r++) {
+        float l = live ? logits[r * E + e] : MASKED;
+        vals[e] = l;
+        barrier();
+        float m = reduceMax(l);
+        float s = reduceSum(live ? exp(l - m) : 0.0);
+        // Rank by counting: experts strictly ahead of e (larger logit, or equal logit at a lower index).
+        uint rank = 0u;
+        if (live) {
+            for (uint j = 0u; j < E; j++) {
+                float o = vals[j];
+                if (o > l || (o == l && j < e)) rank++;
+            }
+            if (rank < pc.k) total += exp(l - m) / s;
+        }
+        barrier();
+    }
+
+    float grand = reduceSum(live ? total : 0.0);
+    float p = live ? total / max(grand, 1e-9) : 0.0;
+    vals[e] = p;
+    barrier();
+    uint rank = 0u;
+    if (live) {
+        for (uint j = 0u; j < E; j++) {
+            float o = vals[j];
+            if (o > p || (o == p && j < e)) rank++;
+        }
+        sorted[rank] = p;
+    }
+    barrier();
+    // Serial exclusive scan in sorted order: the same float operation order as the CPU (cum += p; keep = cum - p < topP).
+    if (e == 0u) {
+        float cum = 0.0;
+        for (uint i = 0u; i < E; i++) {
+            float q = sorted[i];
+            cum += q;
+            keepByRank[i] = (i == 0u || (cum - q) < pc.topP) ? 1u : 0u;
+        }
+    }
+    barrier();
+    if (live && keepByRank[rank] == 0u) {
+        for (uint r = 0u; r < pc.rows; r++) logits[r * E + e] = MASKED;
+    }
+}

@@ -134,6 +134,6 @@ public static class CloverGgufConventions
         var parts = BidirectionalPreviewSuffixes.Select((sfx, i) => $"{sfx} x{counts[i]}");
         Console.Error.WriteLine(
             $"[clover] {host}: {total} bidirectional block-preview tensors ({string.Join(", ", parts)}; ~{bytes / 1024} KiB) are read "
-            + "only by the block preview forward (#1815); the causal forward ignores them. Block-diffusion decoding is not implemented (#1794).");
+            + "only by the block preview forward (#1815); the causal forward ignores them. Block-diffusion decoding (#1828) is opt-in: DOTLLM_CLOVER_DECODE=block.");
     }
 }

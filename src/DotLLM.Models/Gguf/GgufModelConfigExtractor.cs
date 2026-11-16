@@ -1151,6 +1151,9 @@ public static partial class GgufModelConfigExtractor
             : -1,
         MoeBlockCoresetEnabled = metadata.GetBoolOrDefault($"{arch}.moe_block_coreset_enabled", false),
         MoeBlockCoresetTopP = metadata.GetFloat32OrDefault($"{arch}.moe_block_coreset_top_p", 0.9f),
+        PadTokenId = metadata.TryGetValue("tokenizer.ggml.padding_token_id", out _)
+            ? (int)metadata.GetUInt32OrDefault("tokenizer.ggml.padding_token_id", uint.MaxValue)
+            : -1,
     };
 
     private static int MaxNonZero(int[] values, int fallback)

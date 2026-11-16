@@ -1541,7 +1541,7 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
     private void RunGpuPlacedMoeLayer(
         int layer, Qwen3MoeLayerWeights lw,
         in VulkanQwen3MoeHybridWeights.LayerBuffers layerBuf,
-        int seqLen, int hiddenSize, float eps)
+        int seqLen, int hiddenSize, float eps, float blockCoresetTopP = 0f)
     {
         // Resolve this layer's routed experts: either fetch a resident bundle
         // (opt-in) or upload fresh and dispose after the layer (default —
@@ -1573,7 +1573,8 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
         nint cmdBuf = _submit.CommandBuffer;
         KernelSupport.HostToComputeBarrier(cmdBuf);
 
-        if (CanRecordMoeDecodeFast(moeBuf, seqLen, hiddenSize))
+        // The fused single-token layer has no coreset hook: a Clover preview (#1828) always takes RecordMoeLayer.
+        if (blockCoresetTopP <= 0f && CanRecordMoeDecodeFast(moeBuf, seqLen, hiddenSize))
         {
             RecordMoeDecodeFast(cmdBuf, moeBuf, layerBuf, hiddenSize, eps);
             KernelSupport.ComputeToHostBarrier(cmdBuf);
@@ -1591,7 +1592,7 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
             rowCount: seqLen, n: hiddenSize, eps: eps);
         KernelSupport.ComputeToComputeBarrier(cmdBuf);
 
-        RecordMoeLayer(cmdBuf, moeBuf, layerBuf.PostAttnNormWeight, seqLen, hiddenSize, eps);
+        RecordMoeLayer(cmdBuf, moeBuf, layerBuf.PostAttnNormWeight, seqLen, hiddenSize, eps, blockCoresetTopP);
         KernelSupport.ComputeToComputeBarrier(cmdBuf);
 
         // Second residual add (straight into HiddenState: it is not an input of the add).
@@ -1811,7 +1812,7 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
     /// </summary>
     private void RunCpuPlacedMoeLayer(
         int layer, in VulkanQwen3MoeHybridWeights.LayerBuffers layerBuf,
-        int seqLen, int hiddenSize, float eps)
+        int seqLen, int hiddenSize, float eps, float blockCoresetTopP = 0f)
     {
         // ── GPU half: residual snapshot + post-attn RMSNorm → NormOutput. ──
         _submit.Begin();
@@ -1834,7 +1835,7 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
         {
             var hostSpan = hostBuf.AsSpan(0, elemCount);
             _device.Download(_state.NormOutput, hostSpan);
-            RunMoeLayerOnCpu(_cpuLayers[layer].Moe, seqLen, hiddenSize, hostSpan);
+            RunMoeLayerOnCpu(_cpuLayers[layer].Moe, seqLen, hiddenSize, hostSpan, blockCoresetTopP);
             _device.Upload(hostSpan, _state.NormOutput);
         }
         finally
@@ -1867,7 +1868,7 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
     /// separate delta system; CPU-placed layers under an active LoRA
     /// adapter are a known v1 gap (#370 ledger).
     /// </summary>
-    private static unsafe void RunMoeLayerOnCpu(MoeLayerWeights moe, int seqLen, int hiddenSize, Span<float> normOut)
+    private static unsafe void RunMoeLayerOnCpu(MoeLayerWeights moe, int seqLen, int hiddenSize, Span<float> normOut, float blockCoresetTopP = 0f)
     {
         int numExperts = moe.NumExperts;
         int numExpertsPerTok = moe.NumExpertsPerTok;
@@ -1895,7 +1896,8 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
                 numExpertsPerTok: numExpertsPerTok,
                 hiddenSize: hiddenSize,
                 seqLen: seqLen,
-                normTopKProb: moe.NormTopKProb);
+                normTopKProb: moe.NormTopKProb,
+                blockCoresetTopP: blockCoresetTopP);
 
             ReadOnlySpan<float> sharedGateSpan = moe.SharedExpertGate is not null
                 ? moe.SharedExpertGate.AsSpan()
@@ -2395,7 +2397,7 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
     /// </summary>
     private unsafe void RecordMoeLayer(
         nint cmdBuf, VulkanQwen3MoeMoeUpload.LayerBundle moeW,
-        VulkanDevice.Buffer? postAttnNormWeight, int seqLen, int hidden, float eps)
+        VulkanDevice.Buffer? postAttnNormWeight, int seqLen, int hidden, float eps, float blockCoresetTopP = 0f)
     {
         int interm = moeW.IntermediateSize;
         int numE = moeW.NumExperts;
@@ -2425,6 +2427,14 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
         OvPoint(cmdBuf);
         KernelSupport.ComputeToComputeBarrier(cmdBuf);
         MoeStage("router");
+
+        // 1b. Clover block expert coreset (preview forwards only, #1828): mask the router logits before the top-k.
+        if (blockCoresetTopP > 0f)
+        {
+            if (moeW.SigmoidGating) throw new NotSupportedException("The Clover block coreset is defined for softmax routing only.");
+            _cloverKernels!.RecordCoreset(cmdBuf, _state.MoeRouterLogits, seqLen, numE, topK, blockCoresetTopP);
+            KernelSupport.ComputeToComputeBarrier(cmdBuf);
+        }
 
         // 2. Top-k: softmax (Qwen), or sigmoid + selection bias (LFM2-MoE, #1015).
         if (moeW.SigmoidGating)

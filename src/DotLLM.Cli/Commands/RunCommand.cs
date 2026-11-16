@@ -332,6 +332,14 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         public DotLLM.Engine.PromptLookupOptions? PromptLookupOptions
             => PromptLookup ? DotLLM.Engine.PromptLookupOptions.Create(LookupDraft, LookupNgram) : null;
 
+        /// <summary>Clover (clover_moe) decode mode (#1828).</summary>
+        [CommandOption("--clover-decode <MODE>")]
+        [Description("Clover (clover_moe) only: 'causal' (default, autoregressive) or 'block' (LowConfidence block diffusion: 32-token blocks " +
+                     "resolved by bidirectional previews with the block expert coreset, then committed causally; needs the official DiffuSpace GGUF " +
+                     "on the CPU or Vulkan host). Block mode supports greedy and temperature/top-k/top-p sampling; no logprobs, constraints, LoRA " +
+                     "or draft model, and the official penalties (stage 6) are not applied. Env fallback: DOTLLM_CLOVER_DECODE.")]
+        public string? CloverDecode { get; set; }
+
         /// <summary>Opt-out of MTP self-speculative decoding when the loaded GGUF carries an MTP head.</summary>
         [CommandOption("--no-mtp")]
         [Description("Disable Multi-Token Prediction (MTP) self-speculative decoding. When enabled (default), " +
@@ -909,6 +917,8 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 mtpEnabled: !settings.NoMtp, mtpAdaptive: true,
                 prefillChunkSize: settings.PrefillChunkSize,
                 promptLookup: settings.PromptLookupOptions);
+            if (settings.CloverDecode is not null)
+                generator.CloverDecode = DotLLM.Engine.TextGenerator.ParseCloverDecodeOption(settings.CloverDecode);
             var totalSw = Stopwatch.StartNew();
             int generated = 0;
             InferenceTimings timings = default;

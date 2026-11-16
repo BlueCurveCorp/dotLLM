@@ -21,7 +21,11 @@ namespace DotLLM.Core.Models;
 /// are unchanged; rows at and above it are scratch the next causal forward overwrites. A block decoder (stage 4) therefore calls this
 /// repeatedly on the same committed state while denoising, then commits the resolved block with an ordinary causal forward.
 /// </para>
-/// <para>The block expert coreset (<c>moe_block_coreset_enabled</c>) is not applied: routing is the causal path's plain top-k.</para>
+/// <para>
+/// The block expert coreset (<c>moe_block_coreset_enabled</c>, <see cref="CloverConfig.PreviewCoresetTopP"/>) is applied in every MoE
+/// layer of the preview, as HF does (#1828): a router-logit mask before top-k that restricts the whole block to one expert subset covering
+/// <c>top_p</c> of its aggregated top-k routing mass. The causal forward never applies it.
+/// </para>
 /// </remarks>
 public interface ICloverBlockPreview
 {
