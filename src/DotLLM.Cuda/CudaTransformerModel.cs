@@ -4610,7 +4610,11 @@ public sealed unsafe class CudaTransformerModel : IModel
             Environment.GetEnvironmentVariable(Core.Configuration.DeviceMemoryBudget.ReserveEnvVar));
         long fixedBytes = _state.PendingLazyScratchBytes;
         long poolPerToken = CudaPagedKvCacheFactory.PoolBytesPerToken(geom);
-        long perToken = poolPerToken + CudaPagedKvCacheFactory.GatherScratchBytesPerToken(geom) + _state.ActivationBytesPerToken;
+        // Each live cache owns a gather scratch up to the pool's length: the request's own plus the live-KV prefix cache's
+        // retained entries (PrefixCache keeps up to 4).
+        long perToken = poolPerToken
+                        + CudaPagedKvCacheFactory.GatherScratchBytesPerToken(geom) * CudaPagedKvCacheFactory.LiveCachesCharged
+                        + _state.ActivationBytesPerToken;
         int fit = CudaPagedKvCacheFactory.FitPoolTokens((long)free, reserve, fixedBytes, perToken, requestedTokens);
         int tokens = fit > 0 ? fit : Math.Min(requestedTokens, Core.Configuration.DeviceMemoryBudget.ContextGranularity);
         summary = $"GPU paged KV pool: {tokens} tokens ({(tokens * poolPerToken) >> 20} MiB) of {requestedTokens} requested; "
@@ -4634,7 +4638,10 @@ public sealed unsafe class CudaTransformerModel : IModel
     public CudaPagedKvCache CreatePagedKvCache(CudaKvBlockPool pool, int maxSeqLen)
     {
         _context.MakeCurrent();
-        return new CudaPagedKvCache(pool, maxSeqLen);
+        // #1833: a sequence cannot outgrow the pool, so its gather scratch (sized by maxSeqLen, allocated per request on top of
+        // the pool) is bounded to the capacity the pool fit charged for. A longer request fails at the first position past the
+        // pool with the cache's own length error instead of exhausting the pool mid-prefill.
+        return new CudaPagedKvCache(pool, CudaPagedKvCacheFactory.ClampToPool(maxSeqLen, pool));
     }
 
     /// <summary>

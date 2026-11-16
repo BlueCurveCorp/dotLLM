@@ -27,7 +27,7 @@ public sealed class CudaPagedKvPoolSizingTests
 
     private static long TwilPerToken =>
         CudaPagedKvCacheFactory.PoolBytesPerToken(TwilGeometry)
-        + CudaPagedKvCacheFactory.GatherScratchBytesPerToken(TwilGeometry)
+        + CudaPagedKvCacheFactory.GatherScratchBytesPerToken(TwilGeometry) * CudaPagedKvCacheFactory.LiveCachesCharged
         + TwilActivationsPerToken;
 
     [Fact]
@@ -107,6 +107,16 @@ public sealed class CudaPagedKvPoolSizingTests
         // Less than one 1024-token granule is free, but the small request fits: granted, not rounded down to 0.
         Assert.Equal(512, CudaPagedKvCacheFactory.FitPoolTokens(600 * TwilPerToken, 0, 0, TwilPerToken, 512));
         Assert.Equal(0, CudaPagedKvCacheFactory.FitPoolTokens(511 * TwilPerToken, 0, 0, TwilPerToken, 512));
+    }
+
+    [Fact]
+    public void ClampToPool_CapsASequenceAtThePoolCapacity()
+    {
+        // A 131072-token request (TwIL's window) against a 20480-token pool: the gather scratch must be sized to the pool
+        // (80 MiB for TwIL), not the request (512 MiB, uncharged by the fit).
+        Assert.Equal(20480, CudaPagedKvCacheFactory.ClampToPool(131072, totalBlocks: 1280, blockSize: 16));
+        Assert.Equal(300, CudaPagedKvCacheFactory.ClampToPool(300, totalBlocks: 1280, blockSize: 16));
+        Assert.Equal(int.MaxValue, CudaPagedKvCacheFactory.ClampToPool(int.MaxValue, totalBlocks: int.MaxValue, blockSize: 16));
     }
 
     [Fact]

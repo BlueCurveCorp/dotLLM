@@ -30,6 +30,30 @@ public sealed class CudaPagedKvCacheFactory : IDisposable
     public const int DefaultMaxTotalTokens = 65536;
 
     /// <summary>
+    /// Per-sequence caches whose gather scratch the pool fit charges: the request being served plus the live-KV prefix cache's
+    /// retained entries (<c>PrefixCache</c> default of 4).
+    /// </summary>
+    public const int LiveCachesCharged = 5;
+
+    /// <summary>
+    /// The capacity a per-sequence cache over <paramref name="pool"/> gets: the request, capped at the pool's total tokens
+    /// (a sequence cannot hold more blocks than the pool has; #1833).
+    /// </summary>
+    /// <param name="requestedTokens">The caller's maximum sequence length.</param>
+    /// <param name="pool">The shared pool.</param>
+    /// <returns>The clamped length.</returns>
+    public static int ClampToPool(int requestedTokens, CudaKvBlockPool pool)
+        => ClampToPool(requestedTokens, pool.TotalBlocks, pool.BlockSize);
+
+    /// <summary>GPU-free form of <see cref="ClampToPool(int, CudaKvBlockPool)"/>.</summary>
+    /// <param name="requestedTokens">The caller's maximum sequence length.</param>
+    /// <param name="totalBlocks">Blocks in the pool.</param>
+    /// <param name="blockSize">Tokens per block.</param>
+    /// <returns>The clamped length.</returns>
+    public static int ClampToPool(int requestedTokens, int totalBlocks, int blockSize)
+        => (int)Math.Min(requestedTokens, (long)totalBlocks * blockSize);
+
+    /// <summary>
     /// Device bytes one token of pool capacity costs: K and V rows (FP16) across every KV slot of <paramref name="geometry"/>.
     /// TwIL-8B (40 layers, 8 KV heads x 128): 160 KiB, so the fixed 65536-token pool was 10 GiB (#1833).
     /// </summary>
