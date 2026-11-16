@@ -23,7 +23,8 @@ public sealed class HfChatTemplateCliTests : IDisposable
             """{"model":{"type":"BPE","vocab":{"B":0},"merges":[]},"pre_tokenizer":{"type":"ByteLevel"}}""");
         File.WriteAllText(Path.Combine(_directory, "tokenizer_config.json"), "{\"chat_template\":17}");
         string[] args = string.Equals(command, "run", StringComparison.Ordinal)
-            ? [command, _directory, "--device", "cpu", "--prompt", "B"]
+            ? [command, _directory, "--device", "cpu", "--prompt", "B", "--tools",
+                """[{"type":"function","function":{"name":"A","parameters":{"type":"object"}}}]"""]
             : [command, _directory, "--device", "cpu"];
 
         var result = Run(args);
@@ -35,10 +36,10 @@ public sealed class HfChatTemplateCliTests : IDisposable
 
     [Theory]
     [InlineData(false, false, 1)]
-    [InlineData(true, false, 5)]
+    [InlineData(true, false, 1)]
     [InlineData(true, true, 6)]
     [InlineData(false, true, 1)]
-    public void Run_PrefillsTheSelectedTemplateAndToolDefinitions(bool hasTemplate, bool useTools, int promptTokens)
+    public void Run_KeepsPromptRawUnlessToolsRequireTemplate(bool hasTemplate, bool useTools, int promptTokens)
     {
         WriteTinyModel();
         if (hasTemplate)
@@ -54,6 +55,18 @@ public sealed class HfChatTemplateCliTests : IDisposable
         using var json = JsonDocument.Parse(result.Output);
         Assert.Equal(promptTokens, json.RootElement.GetProperty("usage").GetProperty("prompt_tokens").GetInt32());
         Assert.Equal(useTools && !hasTemplate, result.Error.Contains("--tools is ignored", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Run_WithoutTools_DoesNotParseUnusedTemplate()
+    {
+        WriteTinyModel();
+        File.WriteAllText(Path.Combine(_directory, "tokenizer_config.json"), "{\"chat_template\":17}");
+        var result = Run(["run", _directory, "--device", "cpu", "--prompt", "B",
+            "--max-tokens", "1", "--threads", "1", "--json"]);
+        Assert.Equal(0, result.Code);
+        using var json = JsonDocument.Parse(result.Output);
+        Assert.Equal(1, json.RootElement.GetProperty("usage").GetProperty("prompt_tokens").GetInt32());
     }
 
     private void WriteTinyModel()

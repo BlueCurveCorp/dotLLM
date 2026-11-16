@@ -259,7 +259,7 @@ Templates use **Jinja2 syntax** (HuggingFace standard), stored in:
 - GGUF: `tokenizer.chat_template` metadata key
 - HuggingFace: `tokenizer_config.json` → `chat_template` field
 
-For local HuggingFace SafeTensors checkpoints, `run` and `chat` use
+For local HuggingFace SafeTensors checkpoints, `run --tools` and `chat` use
 `HfChatTemplateFactory` with the existing HF tokenizer. It accepts an embedded
 string, a name-to-template object, or a list of `{ "name", "template" } entries.
 Standalone `chat_template.jinja` overrides the embedded `default` entry;
@@ -269,15 +269,16 @@ The loader never picks an arbitrary named entry. Invalid JSON, malformed templat
 declarations and unsupported Jinja fail instead of silently changing the prompt.
 
 Templates receive the loaded tokenizer's BOS/EOS spellings and retain its
-control-token guard. With no template, `run` keeps the raw prompt and `chat` warns
-and uses its plain transcript fallback. With a template, SafeTensors `run` formats
-the prompt as one user turn and appends the generation prompt. GGUF selection is
-unchanged. HF tool prompting requires the selected template to reference the
+control-token guard. `run` keeps the raw prompt by default for both HF and GGUF,
+and does not parse unused template declarations. With tools, it formats the prompt
+as one user turn and appends the generation prompt. With no template, `chat` warns
+and uses its plain transcript fallback. HF tool prompting requires the selected template to reference the
 wired `tools` or `xml_tools` variable; comments and quoted text do not qualify.
 Otherwise the CLI warns and ignores `--tools`. The existing parser is selected
 from the chosen template source and model architecture. A `python_tools`-only
 template needs explicit template kwargs, which these CLI entry points do not
-currently provide. Template wiring does not establish a model's tool-calling quality.
+currently provide. `SupportsTools` is a lexical heuristic, not proof that a template
+uses the tools correctly. Template wiring does not establish a model's tool-calling quality.
 
 ### Required Jinja2 Subset
 
@@ -380,7 +381,7 @@ Spellings written by the template itself are never marked, so turn markers, BOS 
 ids and ordinary conversations tokenize byte-identically to before.
 
 - Raw entry points keep scan-everything semantics: `/v1/completions`, `/tokenize`, `/api/generate` with `raw: true`, CLI `run`
-  without a chat template. The caller writes those prompts. (A literal `U+FDD0` is dropped from every prompt.)
+  without tools. The caller writes those prompts. (A literal `U+FDD0` is dropped from every prompt.)
 - Replayed **assistant** content keeps the model's reasoning tags live (`<think>` / `</think>`, Gemma-4 channel tags) because
   templates parse them out of history (Qwen3: `content.split('</think>')`); every other spelling in assistant content is guarded.
 - Encoder-only tokenizers (WordPiece, Unigram) are not on a chat path and are unchanged.

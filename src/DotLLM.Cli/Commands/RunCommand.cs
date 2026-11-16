@@ -474,7 +474,8 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 tokenizer = ModelLoader.LoadTokenizerFromHfDirectory(hfDir)
                     ?? throw new InvalidOperationException(
                         $"No tokenizer.json (or legacy vocab.json/merges.txt) found in '{hfDir}'.");
-                hfTemplate = HfChatTemplateFactory.TryCreate(hfDir, tokenizer, useTools: tools is { Length: > 0 });
+                if (tools is { Length: > 0 })
+                    hfTemplate = HfChatTemplateFactory.TryCreate(hfDir, tokenizer, useTools: true);
                 var threadingCfg = new ThreadingConfig(
                     settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
                 var (m, src, cfg) = ModelLoader.LoadFromSafetensors(hfDir, threadingCfg);
@@ -649,7 +650,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
         var threadingInfo = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
 
-        // Format HF prompts with the checkpoint template; GGUF keeps its existing tools-only formatting.
+        // Run accepts raw prompts for both formats; tools require chat formatting.
         IToolCallParser? toolCallParser = null;
         string effectivePrompt = prompt;
         if (tools is { Length: > 0 } && gguf is null && hfTemplate?.SupportsTools != true)
@@ -661,7 +662,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 AnsiConsole.MarkupLine($"[yellow]{warning}[/]");
             tools = null;
         }
-        if (tools is { Length: > 0 } || hfTemplate is not null)
+        if (tools is { Length: > 0 })
         {
             var chatTemplate = hfTemplate
                 ?? GgufChatTemplateFactory.TryCreate(gguf!.Metadata, tokenizer, config.Architecture)

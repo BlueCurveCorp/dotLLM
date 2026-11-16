@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using DotLLM.Tests.Integration.Fixtures;
 using DotLLM.Tokenizers;
 using DotLLM.Tokenizers.Bpe;
 using DotLLM.Tokenizers.Hf;
@@ -151,12 +152,13 @@ public sealed class HfDigitsByteLevelTests
 
     private static string ReadRealTokenizer()
     {
-        string path = Environment.GetEnvironmentVariable("DOTLLM_TEST_SMOLLM2_TOKENIZER_JSON")
-            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dotllm", "models", "HuggingFaceTB", "SmolLM2-135M-Instruct-F16-derived", "tokenizer.json");
+        var location = TestFixtureResolver.ResolveFile("DOTLLM_TEST_SMOLLM2_TOKENIZER_JSON",
+            "HuggingFaceTB", "SmolLM2-135M", "tokenizer.json");
+        string missing = location.SkipMessage("pinned HuggingFaceTB/SmolLM2-135M tokenizer.json");
         if (Environment.GetEnvironmentVariable("DOTLLM_TEST_HF_TOKENIZER_REQUIRED") is "1")
-            Assert.True(File.Exists(path), $"Required SmolLM2 tokenizer fixture is absent: {path}");
-        Skip.IfNot(File.Exists(path), "Official SmolLM2 tokenizer fixture is not installed.");
-        byte[] bytes = File.ReadAllBytes(path);
+            Assert.True(location.Found, missing);
+        Skip.IfNot(location.Found, missing);
+        byte[] bytes = File.ReadAllBytes(location.Path!);
         Assert.Equal("9CA9ACDDB6525A194EC8AC7A87F24FBBA7232A9A15FFA1AF0C1224FCD888E47C", Convert.ToHexString(SHA256.HashData(bytes)));
         return Encoding.UTF8.GetString(bytes);
     }
