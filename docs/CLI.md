@@ -1092,7 +1092,7 @@ ending `_LEGACY`, `DISABLE_*` or `*_PROFILE` / `*_TRACE` / `*_DEBUG` is typicall
 | `DOTLLM_VK_LFM3_ATTN_CHUNK` | DOTLLM_VK_LFM3_ATTN_CHUNK=0 disables query-row slicing of long prefills (A/B and bisection). | `VulkanLfm3TransformerModel.cs` |
 | `DOTLLM_VK_LFM3_GLOBAL_GQA` | A/B switch (DOTLLM_VK_LFM3_GLOBAL_GQA=0): global-attention prefills go back to the per-head coopmat flash kernel. | `VulkanLfm3TransformerModel.cs` |
 | `DOTLLM_VK_LFM3_SLIDING_OPT` | A/B switch (DOTLLM_VK_LFM3_SLIDING_OPT=0): restores the pre-#1572 behaviour (full-range split-KV, per-head flash) for sliding layers. | `VulkanLfm3TransformerModel.cs` |
-| `DOTLLM_VK_LMHEAD_BF16_TO_Q8` | #1816 (user-approved, opt-in): a BF16 LM head is requantized to Q8_0 at load (DOTLLM_VK_LMHEAD_BF16_TO_Q8=1). The head is the largest per-token read of a decode (Clover-35B-A3B: [248320 x 2048] BF16 = 1.02 GB, 5.0 ms/token at ~... | `VulkanQwen3MoeHybridWeights.cs` |
+| `DOTLLM_VK_LMHEAD_BF16_TO_Q8` | #1816: a BF16 LM head is requantized to Q8_0 at load, ON by default (James, #1829; DOTLLM_VK_LMHEAD_BF16_TO_Q8=0 keeps exact BF16). The head is the largest per-token read of a decode (Clover-35B-A3B: [248320 x 2048] BF16 = 1.02... | `VulkanQwen3MoeHybridWeights.cs` |
 | `DOTLLM_VK_MAMBA2_SCAN_LEGACY` | Environment variable that disables this kernel so the reference scan is used (A/B). | `Mamba2SelectiveScanRegsF32Kernel.cs` |
 | `DOTLLM_VK_MLA_LEGACY` | (not described in source) | `VulkanWeights.cs` |
 | `DOTLLM_VK_MMQ_CM1` | DOTLLM_VK_MMQ_CM1=0 disables the int8-coopmat GEMMs (A/B against the F16 coopmat GEMMs). | `MatMulMmqCm1Kernel.cs` |
