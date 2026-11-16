@@ -4974,13 +4974,13 @@ public sealed unsafe partial class CudaKernels : IDisposable
 
     /// <summary>
     /// Enables <see cref="LaunchAttentionPaged"/> in <c>CudaTransformerModel</c>'s paged-cache
-    /// decode dispatch, in place of the default gather-into-scratch path. Default OFF (this
-    /// kernel has not been measured against the gather path yet -- see issue #200's own
-    /// "wire in behind an opt-in flag" requirement and <c>docs/perf/CUDA_PAGED_ATTENTION_DESIGN.md</c>).
-    /// Set <c>DOTLLM_ATTN_PAGED_NATIVE=1</c> to opt in.
+    /// decode dispatch, in place of the gather-into-scratch path. Default ON since #1839: the
+    /// gather issued two D2D copies per block per layer every decode step (~3,440 copies/token at
+    /// 686 tokens on a 40-layer model) and made paged decode 5x slower than non-paged on an
+    /// RTX 3060. Set <c>DOTLLM_ATTN_PAGED_NATIVE=0</c> to force the gather path.
     /// </summary>
     public static bool EnableNativePagedAttention { get; set; } =
-        Environment.GetEnvironmentVariable("DOTLLM_ATTN_PAGED_NATIVE") == "1";
+        Environment.GetEnvironmentVariable("DOTLLM_ATTN_PAGED_NATIVE") != "0";
 
     /// <summary>
     /// Issue #200: direct block-table-read paged decode attention. Same online-softmax math

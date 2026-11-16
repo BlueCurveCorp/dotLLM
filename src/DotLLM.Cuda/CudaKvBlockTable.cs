@@ -10,10 +10,11 @@ namespace DotLLM.Cuda;
 /// </summary>
 public sealed class CudaKvBlockTable
 {
-    private readonly CudaKvBlockPool _pool;
+    private readonly ICudaKvBlockAllocator _pool;
     private readonly int _blockSize;
     private readonly List<int> _blockIds = []; // blockIds[i] = physical block for logical block i
     private int _currentLength;
+    private int _version;
 
     /// <summary>Number of tokens currently stored.</summary>
     public int CurrentLength => _currentLength;
@@ -22,12 +23,29 @@ public sealed class CudaKvBlockTable
     public int BlockCount => _blockIds.Count;
 
     /// <summary>
+    /// Bumped every time a logical block's physical ID changes or a block is added or removed
+    /// (allocation, copy-on-write, seed, fork, free). It is NOT bumped by
+    /// <see cref="SetCurrentLength"/> or <see cref="Advance"/> within allocated blocks, because
+    /// those leave every block ID unchanged. <see cref="CudaPagedKvCache"/> re-uploads its
+    /// device block-pointer arrays only when this changes (issue #1839).
+    /// </summary>
+    internal int Version => _version;
+
+    /// <summary>
     /// Creates a new block table backed by the given pool.
     /// </summary>
-    public CudaKvBlockTable(CudaKvBlockPool pool)
+    public CudaKvBlockTable(CudaKvBlockPool pool) : this((ICudaKvBlockAllocator)pool)
     {
-        _pool = pool;
-        _blockSize = pool.BlockSize;
+    }
+
+    /// <summary>
+    /// Creates a block table over any block allocator. Lets the host-side bookkeeping
+    /// (IDs, CoW, versioning) be unit-tested without a CUDA device (issue #1839).
+    /// </summary>
+    internal CudaKvBlockTable(ICudaKvBlockAllocator allocator)
+    {
+        _pool = allocator;
+        _blockSize = allocator.BlockSize;
     }
 
     /// <summary>
@@ -40,7 +58,10 @@ public sealed class CudaKvBlockTable
         if (blocksNeeded > _blockIds.Capacity)
             _blockIds.Capacity = blocksNeeded;
         while (_blockIds.Count < blocksNeeded)
+        {
             _blockIds.Add(_pool.Allocate());
+            _version++;
+        }
     }
 
     /// <summary>
@@ -84,6 +105,7 @@ public sealed class CudaKvBlockTable
             target._blockIds.Add(blockId);
         }
         target._currentLength = _currentLength;
+        target._version++;
     }
 
     /// <summary>
@@ -107,6 +129,7 @@ public sealed class CudaKvBlockTable
         for (int i = 0; i < blockIds.Count; i++)
             _blockIds.Add(blockIds[i]);
         _currentLength = tokenCount;
+        _version++;
     }
 
     /// <summary>
@@ -144,6 +167,7 @@ public sealed class CudaKvBlockTable
             int newBlockId = _pool.CopyBlock(blockId, stream);
             _pool.Release(blockId);
             _blockIds[logicalBlock] = newBlockId;
+            _version++;
         }
     }
 
@@ -156,6 +180,7 @@ public sealed class CudaKvBlockTable
             _pool.Release(blockId);
         _blockIds.Clear();
         _currentLength = 0;
+        _version++;
     }
 
     /// <summary>
@@ -163,4 +188,29 @@ public sealed class CudaKvBlockTable
     /// Does NOT free excess blocks — they remain allocated for potential reuse.
     /// </summary>
     internal void SetCurrentLength(int length) => _currentLength = length;
+}
+
+/// <summary>
+/// The block-allocation surface <see cref="CudaKvBlockTable"/> needs from a pool. Implemented by
+/// <see cref="CudaKvBlockPool"/>; a host-only fake implements it in unit tests (issue #1839).
+/// </summary>
+internal interface ICudaKvBlockAllocator
+{
+    /// <summary>Tokens per block.</summary>
+    int BlockSize { get; }
+
+    /// <summary>Allocates a block with ref count 1.</summary>
+    int Allocate();
+
+    /// <summary>Increments a block's ref count.</summary>
+    void AddRef(int blockId);
+
+    /// <summary>A block's current ref count.</summary>
+    int RefCount(int blockId);
+
+    /// <summary>Decrements a block's ref count, freeing it at zero.</summary>
+    void Release(int blockId);
+
+    /// <summary>Copies a block's contents into a newly allocated block and returns its ID.</summary>
+    int CopyBlock(int sourceBlockId, nint stream);
 }

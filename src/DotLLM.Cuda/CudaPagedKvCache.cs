@@ -12,8 +12,10 @@ namespace DotLLM.Cuda;
 /// <see cref="PrepareAttentionScratch"/> gathers blocks into — the existing CUDA attention
 /// kernels (<c>attention_f16</c> / <c>attention_f16_gqa_split_kv</c> / G3 / G-flash) read the
 /// gathered scratch exactly as they read a plain <see cref="CudaKvCache"/>'s contiguous buffer.
-/// A direct block-table-read attention kernel (eliminating this gather) is issue #200's separate,
-/// still-blocked scope — see <c>docs/perf/CUDA_PAGED_ATTENTION_DESIGN.md</c>.
+/// Since #1839 decode (one query token) skips that gather and reads the pool in place through
+/// per-layer block-pointer arrays (<see cref="PrepareNativeBlockPtrs"/>, issue #200's kernel); the
+/// gather remains for prefill, sink-bearing layers and stale PTX. See
+/// <c>docs/perf/CUDA_PAGED_ATTENTION_DESIGN.md</c>.
 /// </summary>
 /// <remarks>
 /// Like <see cref="CudaKvCache"/> and <see cref="CudaQuantizedKvCache"/>, this cache is driven
@@ -38,17 +40,21 @@ public sealed class CudaPagedKvCache : IKvCache, IPerLayerKvCache
     private nint _kScratch;
     private nint _vScratch;
 
-    // Issue #200: block-pointer arrays for the direct block-table-read attention kernel
-    // (attention_f16_paged / LaunchAttentionPaged), an alternative to the gather above.
-    // Host side is pinned memory (cuMemHostAlloc) so the small per-decode-step H2D refresh
-    // in PrepareNativeBlockPtrs is genuinely async (same reasoning as issue #251's pinned
-    // D2H pool) rather than blocking on pageable memory. Sized once for the worst case
-    // (ceil(maxSeqLen / blockSize) blocks); reused every call, never reallocated.
+    // Issue #200 / #1839: block-pointer arrays for the direct block-table-read attention kernel
+    // (attention_f16_paged / LaunchAttentionPaged), the default decode path in place of the gather
+    // above. ONE pinned host + ONE device array holds every layer's K and V pointers, laid out
+    // [kv (0=K, 1=V)][layer][maxBlocksPerSeq] (see PtrSlot). It is rebuilt and uploaded with a
+    // single stream-ordered 2D copy only when the block table's Version changes (a new block
+    // every BlockSize tokens, CoW, seed, fork, free), not once per layer per step (#1839: the
+    // old per-layer synchronous H2D pair cost ~17 ms/token on an RTX 3060 at 40 layers).
     private readonly int _maxBlocksPerSeq;
-    private nint _kBlockPtrsHost;
-    private nint _vBlockPtrsHost;
-    private nint _kBlockPtrsDevice;
-    private nint _vBlockPtrsDevice;
+    private nint _blockPtrsHost;
+    private nint _blockPtrsDevice;
+    private nint _uploadEvent;      // recorded after each upload; waited on before the host array is rewritten
+    private bool _uploadPending;
+    private int _uploadedVersion = -1;
+    private int _uploadedBlocks;
+    private long _blockPtrUploads;
 
     private bool _disposed;
 
@@ -129,11 +135,70 @@ public sealed class CudaPagedKvCache : IKvCache, IPerLayerKvCache
         // not KV content) so the opt-in native path never needs a first-call allocation on
         // the decode hot path; unused entirely when DOTLLM_ATTN_PAGED_NATIVE is off.
         _maxBlocksPerSeq = (maxSeqLen + pool.BlockSize - 1) / pool.BlockSize;
-        nuint ptrArrayBytes = (nuint)((long)_maxBlocksPerSeq * IntPtr.Size);
-        CudaDriverApi.cuMemHostAlloc(out _kBlockPtrsHost, ptrArrayBytes, 0).ThrowOnError();
-        CudaDriverApi.cuMemHostAlloc(out _vBlockPtrsHost, ptrArrayBytes, 0).ThrowOnError();
-        CudaDriverApi.cuMemAlloc_v2(out _kBlockPtrsDevice, ptrArrayBytes).ThrowOnError();
-        CudaDriverApi.cuMemAlloc_v2(out _vBlockPtrsDevice, ptrArrayBytes).ThrowOnError();
+        nuint ptrArrayBytes = (nuint)(2L * _numLayers * _maxBlocksPerSeq * IntPtr.Size);
+        CudaDriverApi.cuMemHostAlloc(out _blockPtrsHost, ptrArrayBytes, 0).ThrowOnError();
+        CudaDriverApi.cuMemAlloc_v2(out _blockPtrsDevice, ptrArrayBytes).ThrowOnError();
+        CudaDriverApi.cuEventCreate(out _uploadEvent, CudaDriverApi.CU_EVENT_DISABLE_TIMING).ThrowOnError();
+    }
+
+    /// <summary>
+    /// Index of the (K or V, layer, logical block) entry in the combined block-pointer array:
+    /// layout <c>[kv][layer][maxBlocksPerSeq]</c>, so each layer's K (or V) pointers are
+    /// contiguous, as <c>attention_f16_paged</c> indexes them.
+    /// </summary>
+    /// <param name="kv">0 for K, 1 for V.</param>
+    /// <param name="layer">Layer index.</param>
+    /// <param name="block">Logical block index.</param>
+    /// <param name="numLayers">Layers in the cache.</param>
+    /// <param name="maxBlocks">Per-layer row length of the array.</param>
+    internal static int PtrSlot(int kv, int layer, int block, int numLayers, int maxBlocks)
+        => (kv * numLayers + layer) * maxBlocks + block;
+
+    /// <summary>
+    /// Whether the device block-pointer array must be rebuilt: the table changed since the last
+    /// upload, or the table now has more blocks than were uploaded (issue #1839).
+    /// </summary>
+    internal static bool NeedsBlockPtrUpload(int tableVersion, int uploadedVersion, int blockCount, int uploadedBlocks)
+        => tableVersion != uploadedVersion || blockCount > uploadedBlocks;
+
+    /// <summary>Number of block-pointer uploads performed (tests: proves the per-step cost is gone).</summary>
+    internal long BlockPtrUploads => _blockPtrUploads;
+
+    /// <summary>
+    /// Decode-time (single token) RoPE + K/V write straight into the paged pool (issue #1839), the
+    /// paged twin of <see cref="CudaKvCache.FusedRopeAndUpdateDevice"/>: one
+    /// <c>fused_rope_kv_write_f16</c> launch per layer instead of a RoPE launch plus two D2D copies.
+    /// The kernel writes row <c>cache_pos</c> of the base it is given, so passing the target block's
+    /// base and the offset inside the block lands the row in place. Block allocation and CoW run
+    /// first, exactly as in <see cref="UpdateDevice"/>.
+    /// </summary>
+    internal void FusedRopeAndUpdateDevice(
+        nint qSrc, nint kSrc, nint vSrc,
+        nint positionsDevice, int position,
+        int layerIndex,
+        int numHeads, int numKvHeads, int headDim,
+        int ropeDim, float ropeTheta, int ropeType,
+        nint stream, CudaKernels kernels,
+        nint ropeInvFreq = 0, float ropeMscale = 1.0f)
+    {
+        if ((uint)position >= (uint)_maxSeqLen)
+            throw new ArgumentOutOfRangeException(nameof(position),
+                $"Position {position} exceeds max cache length {_maxSeqLen}.");
+
+        _blockTable.EnsureCapacity(position + 1);
+        _blockTable.EnsureWritable(position, stream);
+        var (blockId, offset) = _blockTable.Resolve(position);
+
+        kernels.LaunchFusedRopeKvWriteF16(
+            qSrc, kSrc, vSrc,
+            _pool.GetKeyPtr(blockId, layerIndex), _pool.GetValuePtr(blockId, layerIndex),
+            positionsDevice, offset,
+            numHeads, numKvHeads, headDim,
+            ropeDim, _pool.KvStrideOf(layerIndex), ropeTheta, ropeType,
+            stream, ropeInvFreq, ropeMscale);
+
+        if (position + 1 > _blockTable.CurrentLength)
+            _blockTable.Advance(position + 1);
     }
 
     /// <summary>
@@ -256,60 +321,96 @@ public sealed class CudaPagedKvCache : IKvCache, IPerLayerKvCache
     }
 
     /// <summary>
-    /// Issue #200: builds this layer's block-pointer arrays for the direct block-table-read
-    /// attention kernel (<c>attention_f16_paged</c> / <c>CudaKernels.LaunchAttentionPaged</c>),
-    /// eliminating <see cref="PrepareAttentionScratch"/>'s D2D gather of KV content. Resolves
-    /// each logical block's device pointer for this layer host-side (cheap pointer
-    /// arithmetic, no device round-trip — mirrors <see cref="CudaKvBlockPool.GetKeyPtr"/>'s
-    /// own cost), then refreshes only the small pointer array on the device
-    /// (<c>blockCount * sizeof(nint)</c> bytes — a handful of blocks in the common case, e.g.
-    /// 17 blocks × 8 bytes × 2 arrays ≈ 272 bytes, vs. the full KV byte gather
-    /// <see cref="PrepareAttentionScratch"/> performs every call).
+    /// Issue #200 / #1839: returns this layer's K and V block-pointer arrays for the direct
+    /// block-table-read attention kernel (<c>attention_f16_paged</c> /
+    /// <c>CudaKernels.LaunchAttentionPaged</c>), which reads the pool in place instead of
+    /// <see cref="PrepareAttentionScratch"/>'s per-block D2D gather of the whole history.
     /// </summary>
     /// <remarks>
-    /// Uses a <b>synchronous</b> <c>cuMemcpyHtoD_v2</c>, not the async entry point, even though
-    /// the host staging buffer is pinned. The pinned buffer is reused across every layer of a
-    /// decode step (never reallocated); an async H2D copy only enqueues the transfer, so the
-    /// very next call (next layer) could overwrite the host buffer before the GPU actually
-    /// reads it — a real host/device race, not a hypothetical one, since this method is called
-    /// once per layer in a tight loop with no synchronization between calls. A synchronous copy
-    /// costs a small fixed PCIe-latency stall (~1-5 µs, dominated by latency not the ~272-byte
-    /// payload) but guarantees the buffer is safe to overwrite the moment this call returns.
-    /// Double-buffering the host array (ping-pong between two pinned buffers) would let this
-    /// go async again; not done here since this path is opt-in/unvalidated and correctness
-    /// takes priority over an unmeasured latency win (see docs/perf/CUDA_PAGED_ATTENTION_DESIGN.md).
+    /// <para>
+    /// The arrays for ALL layers are rebuilt host-side and uploaded together, and only when the
+    /// block table's <see cref="CudaKvBlockTable.Version"/> changed since the last upload. In decode
+    /// that is layer 0 of the step that allocates a new block (every <c>BlockSize</c> tokens) or
+    /// copies-on-write one; every other call is pointer arithmetic with no driver call.
+    /// </para>
+    /// <para>
+    /// The upload is a <c>cuMemcpy2DAsync</c> on <paramref name="stream"/>, so it is ordered after
+    /// any CoW copy and before the attention launch that reads it. The pinned host array is only
+    /// rewritten after <c>cuEventSynchronize</c> on the previous upload's event, so an in-flight
+    /// upload never reads a half-rewritten buffer. In decode that event completed a step ago.
+    /// </para>
     /// </remarks>
     /// <returns>
-    /// Device pointers to the K and V block-pointer arrays, plus the block count (the
-    /// attention kernel derives <c>logical_block = tkv / blockSize</c> itself, so the caller
-    /// does not need to pass the count separately — it's returned only for callers that want
-    /// to reason about it, e.g. tests).
+    /// Device pointers to this layer's K and V block-pointer arrays, plus the block count covering
+    /// the visible sequence (the kernel derives <c>logical_block = tkv / blockSize</c> itself).
     /// </returns>
     internal unsafe (nint kBlockPtrs, nint vBlockPtrs, int blockCount) PrepareNativeBlockPtrs(int layerIndex, nint stream)
     {
+        if ((uint)layerIndex >= (uint)_numLayers)
+            throw new ArgumentOutOfRangeException(nameof(layerIndex));
+
         int currentLength = _blockTable.CurrentLength;
         int blockSize = _pool.BlockSize;
         int blockCount = (currentLength + blockSize - 1) / blockSize;
-        if (blockCount == 0) return (_kBlockPtrsDevice, _vBlockPtrsDevice, 0);
-        if (blockCount > _maxBlocksPerSeq)
+        nint kArr = _blockPtrsDevice + (nint)((long)PtrSlot(0, layerIndex, 0, _numLayers, _maxBlocksPerSeq) * sizeof(nint));
+        nint vArr = _blockPtrsDevice + (nint)((long)PtrSlot(1, layerIndex, 0, _numLayers, _maxBlocksPerSeq) * sizeof(nint));
+        if (blockCount == 0) return (kArr, vArr, 0);
+
+        int tableBlocks = _blockTable.BlockCount;
+        if (tableBlocks > _maxBlocksPerSeq)
             throw new InvalidOperationException(
-                $"CudaPagedKvCache: sequence needs {blockCount} blocks but the block-pointer " +
+                $"CudaPagedKvCache: sequence needs {tableBlocks} blocks but the block-pointer " +
                 $"arrays were only sized for {_maxBlocksPerSeq} (maxSeqLen at construction).");
 
-        var kHost = (nint*)_kBlockPtrsHost;
-        var vHost = (nint*)_vBlockPtrsHost;
-        for (int b = 0; b < blockCount; b++)
+        if (NeedsBlockPtrUpload(_blockTable.Version, _uploadedVersion, tableBlocks, _uploadedBlocks))
+            UploadBlockPtrs(tableBlocks, stream);
+
+        return (kArr, vArr, blockCount);
+    }
+
+    private unsafe void UploadBlockPtrs(int tableBlocks, nint stream)
+    {
+        if (_uploadPending)
         {
-            int blockId = _blockTable.BlockIdAt(b);
-            kHost[b] = _pool.GetKeyPtr(blockId, layerIndex);
-            vHost[b] = _pool.GetValuePtr(blockId, layerIndex);
+            CudaDriverApi.cuEventSynchronize(_uploadEvent).ThrowOnError();
+            _uploadPending = false;
         }
 
-        nuint bytes = (nuint)((long)blockCount * sizeof(nint));
-        CudaDriverApi.cuMemcpyHtoD_v2(_kBlockPtrsDevice, _kBlockPtrsHost, bytes).ThrowOnError();
-        CudaDriverApi.cuMemcpyHtoD_v2(_vBlockPtrsDevice, _vBlockPtrsHost, bytes).ThrowOnError();
+        var host = (nint*)_blockPtrsHost;
+        for (int layer = 0; layer < _numLayers; layer++)
+        {
+            int kBase = PtrSlot(0, layer, 0, _numLayers, _maxBlocksPerSeq);
+            int vBase = PtrSlot(1, layer, 0, _numLayers, _maxBlocksPerSeq);
+            for (int b = 0; b < tableBlocks; b++)
+            {
+                int blockId = _blockTable.BlockIdAt(b);
+                host[kBase + b] = _pool.GetKeyPtr(blockId, layer);
+                host[vBase + b] = _pool.GetValuePtr(blockId, layer);
+            }
+        }
 
-        return (_kBlockPtrsDevice, _vBlockPtrsDevice, blockCount);
+        if (tableBlocks > 0)
+        {
+            nuint pitch = (nuint)((long)_maxBlocksPerSeq * sizeof(nint));
+            var copy = new CudaDriverApi.CudaMemcpy2D
+            {
+                SrcMemoryType = CudaDriverApi.CU_MEMORYTYPE_HOST,
+                SrcHost = _blockPtrsHost,
+                SrcPitch = pitch,
+                DstMemoryType = CudaDriverApi.CU_MEMORYTYPE_DEVICE,
+                DstDevice = _blockPtrsDevice,
+                DstPitch = pitch,
+                WidthInBytes = (nuint)((long)tableBlocks * sizeof(nint)),
+                Height = (nuint)(2 * _numLayers),
+            };
+            CudaDriverApi.cuMemcpy2DAsync_v2(ref copy, stream).ThrowOnError();
+            CudaDriverApi.cuEventRecord(_uploadEvent, stream).ThrowOnError();
+            _uploadPending = true;
+        }
+
+        _uploadedVersion = _blockTable.Version;
+        _uploadedBlocks = tableBlocks;
+        _blockPtrUploads++;
     }
 
     /// <summary>
@@ -375,9 +476,13 @@ public sealed class CudaPagedKvCache : IKvCache, IPerLayerKvCache
         if (_kScratch != 0) { CudaDriverApi.cuMemFree_v2(_kScratch); _kScratch = 0; }
         if (_vScratch != 0) { CudaDriverApi.cuMemFree_v2(_vScratch); _vScratch = 0; }
 
-        if (_kBlockPtrsDevice != 0) { CudaDriverApi.cuMemFree_v2(_kBlockPtrsDevice); _kBlockPtrsDevice = 0; }
-        if (_vBlockPtrsDevice != 0) { CudaDriverApi.cuMemFree_v2(_vBlockPtrsDevice); _vBlockPtrsDevice = 0; }
-        if (_kBlockPtrsHost != 0) { CudaDriverApi.cuMemFreeHost(_kBlockPtrsHost); _kBlockPtrsHost = 0; }
-        if (_vBlockPtrsHost != 0) { CudaDriverApi.cuMemFreeHost(_vBlockPtrsHost); _vBlockPtrsHost = 0; }
+        if (_uploadEvent != 0)
+        {
+            if (_uploadPending) CudaDriverApi.cuEventSynchronize(_uploadEvent);
+            CudaDriverApi.cuEventDestroy_v2(_uploadEvent);
+            _uploadEvent = 0;
+        }
+        if (_blockPtrsDevice != 0) { CudaDriverApi.cuMemFree_v2(_blockPtrsDevice); _blockPtrsDevice = 0; }
+        if (_blockPtrsHost != 0) { CudaDriverApi.cuMemFreeHost(_blockPtrsHost); _blockPtrsHost = 0; }
     }
 }
