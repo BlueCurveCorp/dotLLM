@@ -137,6 +137,13 @@ case "$cmd" in
     reason="${3:-}"
     timeout_sec="${4:-900}"
     stale_sec="${5:-5400}"
+    # (#1831) The stale threshold is chosen by the WAITER, so a short value force-releases a live holder. Floor it at the
+    # documented default; DOTLLM_GPU_LOCK_MIN_STALE lowers the floor for tests only.
+    min_stale="${DOTLLM_GPU_LOCK_MIN_STALE:-5400}"
+    if [ "$stale_sec" -lt "$min_stale" ] 2>/dev/null; then
+      echo "[gpu-lock] stale-sec ${stale_sec}s is below the ${min_stale}s floor; using ${min_stale}s (#1831)" >&2
+      stale_sec="$min_stale"
+    fi
     if [ -z "$name" ] || [ -z "$reason" ]; then
       echo "[gpu-lock] acquire requires <name> and <reason>" >&2
       exit 2
