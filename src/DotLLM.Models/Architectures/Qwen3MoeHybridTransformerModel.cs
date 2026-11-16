@@ -866,6 +866,9 @@ public sealed unsafe partial class Qwen3MoeHybridTransformerModel : IModel, DotL
             OutQuantType = outDesc.QuantizationType,
             OutInputDim = outDesc.Shape[0],
             OutOutputDim = outDesc.Shape[1],
+
+            Preview = CloverGgufConventions.LoadPreviewWeights(config, tensors, prefix, convDim,
+                (desc, n) => DequantizeF32(dataBase, desc, n)),
         };
     }
 
@@ -1480,7 +1483,7 @@ public sealed unsafe partial class Qwen3MoeHybridTransformerModel : IModel, DotL
     private void ForwardFullAttnBody(
         Qwen3FullAttnWeights attn, int layer, int seqLen, ReadOnlySpan<int> positions,
         float* normOut, float* q, float* k, float* v, float* attnOut,
-        int numHeads, int numKvHeads, int headDim, IKvCache? kvCache)
+        int numHeads, int numKvHeads, int headDim, IKvCache? kvCache, bool bidirectionalBlock = false)
     {
         int qElems = numHeads * headDim;
         int qgElems = 2 * qElems;
@@ -1572,9 +1575,21 @@ public sealed unsafe partial class Qwen3MoeHybridTransformerModel : IModel, DotL
             var cachedK = kvCache.GetKeysRef(kvSlot);
             var cachedV = kvCache.GetValuesRef(kvSlot);
 
-            Attention.Execute(q, (float*)cachedK.DataPointer, (float*)cachedV.DataPointer, attnOut,
-                seqLen, seqKv, numHeads, numKvHeads, headDim, positions[0], pool: null,
-                slidingWindowSize: null);
+            if (bidirectionalBlock)
+                // Clover block preview (#1815): every block query sees the whole prefix and the whole block.
+                Attention.Execute(q, (float*)cachedK.DataPointer, (float*)cachedV.DataPointer, attnOut,
+                    seqLen, seqKv, numHeads, numKvHeads, headDim, positions[0], 1.0f / MathF.Sqrt(headDim), pool: null,
+                    slidingWindowSize: null, maskMode: AttentionMaskMode.Bidirectional);
+            else
+                Attention.Execute(q, (float*)cachedK.DataPointer, (float*)cachedV.DataPointer, attnOut,
+                    seqLen, seqKv, numHeads, numKvHeads, headDim, positions[0], pool: null,
+                    slidingWindowSize: null);
+        }
+        else if (bidirectionalBlock)
+        {
+            Attention.Execute(q, k, v, attnOut,
+                seqLen, seqLen, numHeads, numKvHeads, headDim, 0, 1.0f / MathF.Sqrt(headDim), pool: null,
+                slidingWindowSize: null, maskMode: AttentionMaskMode.Bidirectional);
         }
         else
         {

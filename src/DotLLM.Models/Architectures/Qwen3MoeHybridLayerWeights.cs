@@ -111,6 +111,36 @@ internal sealed class GdnTokenMixingWeights
     public required QuantizationType OutQuantType { get; init; }
     public required int OutInputDim { get; init; }
     public required int OutOutputDim { get; init; }
+
+    // ── Clover bidirectional block preview (#1815) ────────────────────────────
+
+    /// <summary>
+    /// Clover's bidirectional-preview parameters (<c>ssm_conv1d.weight_right</c>, <c>ssm_bd_logit_scale.weight</c>,
+    /// <c>ssm_bd_history.{bias,weight}</c>); null for every non-Clover file and for Clover files without them. The causal forward never
+    /// reads them.
+    /// </summary>
+    public CloverPreviewWeights? Preview { get; init; }
+}
+
+/// <summary>
+/// One GDN layer's bidirectional-preview parameters (DiffuSpace <c>modeling_clover_moe.py</c> <c>bd_gdn_conv1d</c> /
+/// <c>bd_gdn_local_memory</c>). Per-V-head arrays are in the file's (tiled, llama.cpp) V-head order, like every other GDN tensor.
+/// </summary>
+internal sealed class CloverPreviewWeights
+{
+    /// <summary><c>ssm_conv1d.weight_right</c> (HF <c>conv_right_weight</c>), <c>[convDim, DConv-1]</c> channel-major: tap <c>d-1</c> of
+    /// channel <c>c</c> (weight on <c>x[t+d]</c>) at <c>c*(DConv-1) + d-1</c>. F32.</summary>
+    public required float[] ConvRightWeight { get; init; }
+
+    /// <summary><c>ssm_bd_logit_scale.weight</c> (HF <c>bd_softmax_logit_scale</c>) [NVHead]: the block-logit temperature.</summary>
+    public required float[] LogitScale { get; init; }
+
+    /// <summary><c>ssm_bd_history.bias</c> (HF <c>bd_softmax_history_bias</c>) [NVHead]: the history-bucket logit bias.</summary>
+    public required float[] HistoryBias { get; init; }
+
+    /// <summary><c>ssm_bd_history.weight</c> (HF <c>bd_softmax_history_c</c>) [NVHead]: the history-bucket logit's
+    /// <c>ln(blockLen / 32)</c> coefficient.</summary>
+    public required float[] HistoryC { get; init; }
 }
 
 /// <summary>

@@ -1,0 +1,81 @@
+#version 450
+// Clover bidirectional block preview (#1815): the GDN per-head softmax over the block plus the read-only history bucket
+// (DiffuSpace modeling_clover_moe.py bd_gdn_local_memory, every block position valid). One workgroup per (block row i, value head vh).
+//
+//   l_j    = logit_scale[vh] * <q_i, k_j>            j = 0..T-1 (q, k already L2-normalised; no 1/sqrt(d), no beta, every j)
+//   l_T    = history_bias[vh] + history_c[vh] * logRatio      (logRatio = ln(T / 32), host-computed)
+//   w      = softmax(l_0..l_T)                                (F32, in shared memory)
+//   out[i] = w_T * decay[i, vh] * invSqrtD * (S^T q_i) + sum_j w_j v_j     S = clean state [dS(key), dS(value)] of head vh, only read
+//
+// Value head vh reads key head vh % nK (the file's tiled V-head order, as the causal scan). Term order matches the CPU reference
+// (CloverPreviewGdnMixer.SoftmaxWorker). Dispatch: groupCount = (T, nV, 1); dS <= MAX_D, T <= MAX_T.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#define MAX_D 256
+#define MAX_T 64
+
+layout(set = 0, binding = 0, std430) readonly  buffer BufState { float clean[];  }; // [nV, dS, dS]
+layout(set = 0, binding = 1, std430) readonly  buffer BufQ     { float q[];      }; // [T, nK, dS]
+layout(set = 0, binding = 2, std430) readonly  buffer BufK     { float k[];      }; // [T, nK, dS]
+layout(set = 0, binding = 3, std430) readonly  buffer BufV     { float v[];      }; // [T, nV, dS]
+layout(set = 0, binding = 4, std430) readonly  buffer BufDecay { float decay[];  }; // [T, nV] exp(g)
+layout(set = 0, binding = 5, std430) readonly  buffer BufScale { float lscale[]; }; // [nV]
+layout(set = 0, binding = 6, std430) readonly  buffer BufHBias { float hbias[];  }; // [nV]
+layout(set = 0, binding = 7, std430) readonly  buffer BufHC    { float hc[];     }; // [nV]
+layout(set = 0, binding = 8, std430) writeonly buffer BufOut   { float outp[];   }; // [T, nV, dS]
+
+layout(push_constant) uniform PushConstants {
+    uint nV;
+    uint nK;
+    uint dS;
+    uint T;
+    float logRatio;
+    float invSqrtD;
+} pc;
+
+shared float qs[MAX_D];
+shared float w[MAX_T + 1];
+
+void main() {
+    uint i = gl_WorkGroupID.x;
+    uint vh = gl_WorkGroupID.y;
+    uint tid = gl_LocalInvocationID.x;
+    uint nK = pc.nK, nV = pc.nV, dS = pc.dS, T = pc.T;
+    uint kh = vh % nK;
+
+    uint qOff = (i * nK + kh) * dS;
+    for (uint e = tid; e < dS; e += 64u) qs[e] = q[qOff + e];
+    barrier();
+
+    float scale = lscale[vh];
+    for (uint j = tid; j < T; j += 64u) {
+        uint kOff = (j * nK + kh) * dS;
+        float dot = 0.0;
+        for (uint e = 0u; e < dS; e++) dot += qs[e] * k[kOff + e];
+        w[j] = scale * dot;
+    }
+    barrier();
+
+    if (tid == 0u) {
+        float hist = hbias[vh] + hc[vh] * pc.logRatio;
+        w[T] = hist;
+        float mx = -1.0 / 0.0;
+        for (uint j = 0u; j <= T; j++) mx = max(mx, w[j]);
+        float sum = 0.0;
+        for (uint j = 0u; j <= T; j++) { float ex = exp(w[j] - mx); w[j] = ex; sum += ex; }
+        float inv = 1.0 / sum;
+        for (uint j = 0u; j <= T; j++) w[j] = w[j] * inv;
+    }
+    barrier();
+
+    float histW = w[T] * decay[i * nV + vh] * pc.invSqrtD;
+    uint sBase = vh * dS * dS;
+    for (uint col = tid; col < dS; col += 64u) {
+        float acc = 0.0;
+        for (uint row = 0u; row < dS; row++) acc += clean[sBase + row * dS + col] * qs[row];
+        float o = acc * histW;
+        for (uint j = 0u; j < T; j++) o += w[j] * v[(j * nV + vh) * dS + col];
+        outp[(i * nV + vh) * dS + col] = o;
+    }
+}

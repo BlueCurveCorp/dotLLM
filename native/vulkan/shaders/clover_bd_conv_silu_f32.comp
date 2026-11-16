@@ -1,0 +1,47 @@
+#version 450
+// Clover bidirectional block preview (#1815): GDN causal depthwise conv over [clean conv state | block] PLUS the in-block right conv,
+// then SiLU (DiffuSpace modeling_clover_moe.py bd_gdn_conv1d). Reads the conv state, never writes it.
+//
+//   acc[t, c] = bias[c] + sum_{k=0..d_conv-1} x[t + k - (d_conv-1), c] * weight[c*d_conv + k]
+//             + sum_{d=1..min(d_conv, T)-1, t+d < T} qkv[(t+d), c] * right[c*(d_conv-1) + d-1]
+//   y[t, c]   = silu(acc)
+//   x[j, c]   = state[(j + d_conv-1) * channels + c] for j < 0, qkv[j * channels + c] otherwise.
+//
+// Same term order as the CPU reference (Conv1dCausal then CloverPreviewGdnMixer.AddRightConv, then SiLU).
+// Dispatch: groupCount = (ceil(channels / 256), seqLen, 1).
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly  buffer BufState  { float state[];  }; // [(d_conv-1) * channels]
+layout(set = 0, binding = 1, std430) readonly  buffer BufQkv    { float qkv[];    }; // [seqLen * channels] raw projections
+layout(set = 0, binding = 2, std430) readonly  buffer BufWeight { float weight[]; }; // [channels * d_conv] channel-major
+layout(set = 0, binding = 3, std430) readonly  buffer BufBias   { float bias[];   }; // [channels]
+layout(set = 0, binding = 4, std430) readonly  buffer BufRight  { float right[];  }; // [channels * (d_conv-1)] channel-major
+layout(set = 0, binding = 5, std430) writeonly buffer BufOut    { float outp[];   }; // [seqLen * channels]
+
+layout(push_constant) uniform PushConstants {
+    uint dConv;
+    uint channels;
+    uint seqLen;
+} pc;
+
+void main() {
+    uint c = gl_GlobalInvocationID.x;
+    uint t = gl_WorkGroupID.y;
+    if (c >= pc.channels || t >= pc.seqLen) return;
+    uint taps = pc.dConv;
+
+    float acc = bias[c];
+    for (uint k = 0u; k < taps; k++) {
+        int j = int(t) + int(k) - int(taps - 1u);
+        float x = j < 0 ? state[uint(j + int(taps - 1u)) * pc.channels + c] : qkv[uint(j) * pc.channels + c];
+        acc += x * weight[c * taps + k];
+    }
+    uint maxD = min(taps, pc.seqLen) - 1u;
+    for (uint d = 1u; d <= maxD; d++) {
+        if (t + d < pc.seqLen)
+            acc += qkv[(t + d) * pc.channels + c] * right[c * (taps - 1u) + d - 1u];
+    }
+    float sig = 1.0 / (1.0 + exp(-acc));
+    outp[t * pc.channels + c] = acc * sig;
+}

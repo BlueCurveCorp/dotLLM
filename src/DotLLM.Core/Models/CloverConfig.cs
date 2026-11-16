@@ -10,13 +10,13 @@ namespace DotLLM.Core.Models;
 /// The causal (autoregressive) forward of Clover is the Qwen3MoeHybrid forward unchanged: llama.cpp PR #31306's
 /// <c>src/models/clover-moe.cpp</c> builds exactly the qwen35moe graph. So Clover maps onto <c>Architecture.Qwen3MoeHybrid</c> and keeps
 /// every arch-keyed fast path (the #1787 grouped split-KV decode included). Everything here is either inert on that causal path
-/// (the block-diffusion parameters, kept for stages 3-5 of #1794) or a load-time tensor-convention fix-up.
+/// (the block-diffusion parameters, read by the #1815 block preview and the later #1794 stages) or a load-time tensor-convention fix-up.
 /// </para>
 /// <para>
 /// The official GGUF carries 4 bidirectional-preview tensors per GDN layer that the causal forward never reads:
 /// <c>ssm_conv1d.weight_right</c> (HF <c>conv_right_weight</c>), <c>ssm_bd_logit_scale.weight</c> (<c>bd_softmax_logit_scale</c>),
 /// <c>ssm_bd_history.bias</c> (<c>bd_softmax_history_bias</c>) and <c>ssm_bd_history.weight</c> (<c>bd_softmax_history_c</c>).
-/// They stay in the mmap, unconsumed; the loader names them once at load.
+/// The causal forward ignores them; the bidirectional block preview (<see cref="ICloverBlockPreview"/>, #1815) reads them.
 /// </para>
 /// </remarks>
 public sealed record CloverConfig

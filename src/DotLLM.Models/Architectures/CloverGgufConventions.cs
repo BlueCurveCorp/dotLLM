@@ -24,7 +24,8 @@ namespace DotLLM.Models.Architectures;
 /// </remarks>
 public static class CloverGgufConventions
 {
-    /// <summary>The four bidirectional-preview GDN tensor suffixes the causal forward never reads (kept for #1794 stage 3).</summary>
+    /// <summary>The four bidirectional-preview GDN tensor suffixes: read by the block preview forward (#1815), never by the causal one.
+    /// Order matters to <see cref="LoadPreviewWeights"/>.</summary>
     public static readonly string[] BidirectionalPreviewSuffixes =
     [
         "ssm_conv1d.weight_right",   // HF conv_right_weight            [3, convDim]
@@ -63,8 +64,49 @@ public static class CloverGgufConventions
     }
 
     /// <summary>
-    /// Writes one load-log line naming the Clover tensors the causal forward leaves unconsumed (they stay in the mmap). No-op for
-    /// non-Clover models or files without them.
+    /// Reads one GDN layer's four bidirectional-preview tensors (#1815) as F32, or <see langword="null"/> when the model is not Clover or
+    /// the file does not carry them (llama.cpp PR #31306's converter drops them). A partial set throws: the preview forward needs all four.
+    /// </summary>
+    /// <param name="config">Model configuration.</param>
+    /// <param name="tensors">The GGUF tensor directory.</param>
+    /// <param name="layerPrefix">The layer prefix, e.g. <c>blk.0</c>.</param>
+    /// <param name="convDim">GDN conv channels, <c>(2*NKHead + NVHead) * DState</c>.</param>
+    /// <param name="read">Dequantises a tensor to F32 (<c>n</c> elements).</param>
+    internal static CloverPreviewWeights? LoadPreviewWeights(ModelConfig config, IReadOnlyDictionary<string, GgufTensorDescriptor> tensors,
+                                                            string layerPrefix, int convDim, Func<GgufTensorDescriptor, int, float[]> read)
+    {
+        if (config.Clover is null)
+            return null;
+        var found = new GgufTensorDescriptor?[BidirectionalPreviewSuffixes.Length];
+        int present = 0;
+        for (int s = 0; s < found.Length; s++)
+            if (tensors.TryGetValue($"{layerPrefix}.{BidirectionalPreviewSuffixes[s]}", out var d)) { found[s] = d; present++; }
+        if (present == 0)
+            return null;
+        if (present != found.Length)
+            throw new InvalidDataException($"{layerPrefix}: Clover file carries {present} of the {found.Length} bidirectional-preview tensors.");
+
+        var gdn = config.GdnConfig!.Value;
+        int nV = gdn.NVHead, taps = gdn.DConv - 1;
+        if (found[0]!.Value.Shape.ElementCount != (long)taps * convDim)
+            throw new InvalidDataException(
+                $"{layerPrefix}.ssm_conv1d.weight_right has {found[0]!.Value.Shape.ElementCount} elements, expected (DConv-1)*convDim = {taps * convDim}.");
+        for (int s = 1; s < found.Length; s++)
+            if (found[s]!.Value.Shape.ElementCount != nV)
+                throw new InvalidDataException(
+                    $"{layerPrefix}.{BidirectionalPreviewSuffixes[s]} has {found[s]!.Value.Shape.ElementCount} elements, expected NVHead = {nV}.");
+        return new CloverPreviewWeights
+        {
+            ConvRightWeight = read(found[0]!.Value, taps * convDim),
+            LogitScale = read(found[1]!.Value, nV),
+            HistoryBias = read(found[2]!.Value, nV),
+            HistoryC = read(found[3]!.Value, nV),
+        };
+    }
+
+    /// <summary>
+    /// Writes one load-log line naming the Clover tensors the causal forward does not read (the bidirectional block preview, #1815, does).
+    /// No-op for non-Clover models or files without them.
     /// </summary>
     /// <param name="config">Model configuration.</param>
     /// <param name="tensors">The GGUF tensor directory.</param>
@@ -91,7 +133,7 @@ public static class CloverGgufConventions
             return;
         var parts = BidirectionalPreviewSuffixes.Select((sfx, i) => $"{sfx} x{counts[i]}");
         Console.Error.WriteLine(
-            $"[clover] {host}: causal (AR) forward only; ignoring {total} bidirectional block-diffusion tensors "
-            + $"({string.Join(", ", parts)}; ~{bytes / 1024} KiB, left in the mmap). Block-diffusion decoding is not implemented (#1794).");
+            $"[clover] {host}: {total} bidirectional block-preview tensors ({string.Join(", ", parts)}; ~{bytes / 1024} KiB) are read "
+            + "only by the block preview forward (#1815); the causal forward ignores them. Block-diffusion decoding is not implemented (#1794).");
     }
 }
