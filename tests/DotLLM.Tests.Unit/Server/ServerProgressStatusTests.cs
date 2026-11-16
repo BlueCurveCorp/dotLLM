@@ -130,6 +130,19 @@ public sealed class ServerProgressStatusTests : IAsyncLifetime
         Assert.Equal(JsonValueKind.Null, status.GetProperty("device_fallback_reason").ValueKind);
     }
 
+    /// <summary>The production pipeline (<see cref="ServerStartup.BuildApp"/>, what <c>dotllm serve</c> runs) registers the device headers.</summary>
+    [Fact]
+    public async Task ProductionPipeline_EmitsTheDeviceHeaders()
+    {
+        await using var app = ServerStartup.BuildApp(_state!, ["--urls", "http://127.0.0.1:0"]);
+        await app.StartAsync();
+        using var http = new HttpClient { BaseAddress = new Uri(app.Urls.First()) };
+        using var response = await http.GetAsync("/v1/models");
+        Assert.Equal("cpu", Assert.Single(response.Headers.GetValues(DeviceHeaders.DeviceHeader)));
+        Assert.Equal("true", Assert.Single(response.Headers.GetValues(DeviceHeaders.FallbackHeader)));
+        await app.StopAsync();
+    }
+
     // ── fakes ──
 
     private sealed class StubTokenizer : ITokenizer
