@@ -414,6 +414,11 @@ extern "C" __global__ void __launch_bounds__(256) attention_f16_paged(
     float* score_tile  = smem3 + head_dim;
     float* out_accum   = score_tile + TILE_KV;
     float* warp_scratch = out_accum + head_dim;
+    // #1839: this tile's block pointers, staged once per tile (TILE_KV + 1 entries covers
+    // block_size = 1). Offset (2*head_dim + TILE_KV + 32) floats is 8-byte aligned for even
+    // head_dim. CudaKernels.LaunchAttentionPaged sizes the dynamic shared memory to match.
+    const half** tile_kptr = (const half**)(warp_scratch + 32);
+    const half** tile_vptr = tile_kptr + (TILE_KV + 1);
 
     int lane = threadIdx.x % warpSize;
     int warp_id = threadIdx.x / warpSize;
@@ -437,6 +442,19 @@ extern "C" __global__ void __launch_bounds__(256) attention_f16_paged(
         if (t_end > seq_kv) t_end = seq_kv;
         int tile_len = t_end - t_start;
 
+        // #1839: stage the tile's block pointers in shared memory in parallel, so neither
+        // phase below pays a dependent global load per row (the V loop is serial per thread,
+        // and a per-row pointer load there made paged decode scale worse than attention_f16).
+        // The previous tile's V phase ends in __syncthreads, so overwriting is safe.
+        int first_block = t_start / block_size;
+        int tile_blocks = (t_end - 1) / block_size - first_block + 1;
+        for (int j = threadIdx.x; j < tile_blocks; j += blockDim.x)
+        {
+            tile_kptr[j] = k_block_ptrs[first_block + j];
+            tile_vptr[j] = v_block_ptrs[first_block + j];
+        }
+        __syncthreads();
+
         // 2a. Compute Q·K scores for this tile. Block-table indirection: resolve tkv ->
         // (logical block, offset-in-block) -> device pointer -> row address. This is the
         // ONLY change versus attention_f16_body's flat `k + tkv * kv_stride` addressing.
@@ -456,8 +474,8 @@ extern "C" __global__ void __launch_bounds__(256) attention_f16_paged(
             }
 
             int logical_block = tkv / block_size;
-            int offset_in_block = tkv % block_size;
-            const half* k_block = k_block_ptrs[logical_block];
+            int offset_in_block = tkv - logical_block * block_size;
+            const half* k_block = tile_kptr[logical_block - first_block];
             const half* k_vec = k_block + (size_t)offset_in_block * kv_stride + hkv * head_dim;
 
             float score = 0.0f;
@@ -529,23 +547,22 @@ extern "C" __global__ void __launch_bounds__(256) attention_f16_paged(
         running_sum += warp_scratch[0];
 
         // 2e. Accumulate weighted V — same block-table indirection as the K read above.
-        // #1839: walk the tile one block-run at a time. The old loop did a runtime-divisor
-        // div/mod plus a dependent block-pointer load on EVERY serial iteration, which made
-        // paged decode attention scale worse than attention_f16 with context. The inner loop
-        // over a run has a fixed base, the same shape as attention_f16's V loop. Same
-        // accumulation order (t ascending), so the output stays bit-identical to attention_f16.
+        // #1839: walk the tile one block-run at a time from the staged pointers. The old loop
+        // did a runtime-divisor div/mod plus a dependent global block-pointer load on EVERY
+        // serial iteration, which made paged decode attention scale worse than attention_f16
+        // with context. The inner loop over a run has a fixed base, the same shape as
+        // attention_f16's V loop. Same accumulation order (t ascending), so the output stays
+        // bit-identical to attention_f16.
         for (int d = threadIdx.x; d < head_dim; d += blockDim.x)
         {
             float v_acc = 0.0f;
+            int offset_in_block = t_start - first_block * block_size;
             int t = 0;
-            while (t < tile_len)
+            for (int j = 0; t < tile_len; j++)
             {
-                int tkv = t_start + t;
-                int logical_block = tkv / block_size;
-                int offset_in_block = tkv - logical_block * block_size;
                 int run = block_size - offset_in_block;
                 if (run > tile_len - t) run = tile_len - t;
-                const half* v_run = v_block_ptrs[logical_block]
+                const half* v_run = tile_vptr[j]
                                     + (size_t)offset_in_block * kv_stride + hkv * head_dim + d;
                 for (int i = 0; i < run; i++)
                 {
@@ -554,6 +571,7 @@ extern "C" __global__ void __launch_bounds__(256) attention_f16_paged(
                         v_acc += w * __half2float(v_run[(size_t)i * kv_stride]);
                 }
                 t += run;
+                offset_in_block = 0;
             }
             out_accum[d] += v_acc;
         }
