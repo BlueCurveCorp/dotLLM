@@ -1380,11 +1380,12 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
         !string.Equals(Environment.GetEnvironmentVariable("DOTLLM_VK_FUSE_FORWARD"), "0", StringComparison.Ordinal);
 
     /// <summary>
-    /// #1814: let the one-command-buffer decode also carry layers whose resident banks miss <see cref="RecordMoeDecodeFast"/> (Clover's Q8_0
-    /// layer 0), recording the general device-resident MoE layer for them in the same buffer instead of dropping the WHOLE token onto the
-    /// per-layer path (two fence round trips per layer). Opt-in: <c>DOTLLM_VK_FUSE_MIXED_MOE=1</c>.
+    /// #1814, on by default (DOTLLM_VK_FUSE_MIXED_MOE=0 restores the per-layer path): single-token decode stays one command buffer when some
+    /// layers' resident banks miss <see cref="RecordMoeDecodeFast"/> (Clover's Q8_0 layer 0), recording the general device-resident MoE layer
+    /// for them in the same buffer instead of dropping the WHOLE token onto the per-layer path (two fence round trips per layer). Default for
+    /// every Qwen3MoeHybrid file (user decision, #1817); the logits are bit-identical to the per-layer path.
     /// </summary>
-    internal static bool FuseMixedMoeDecode { get; set; } = Environment.GetEnvironmentVariable("DOTLLM_VK_FUSE_MIXED_MOE") == "1";
+    internal static bool FuseMixedMoeDecode { get; set; } = Environment.GetEnvironmentVariable("DOTLLM_VK_FUSE_MIXED_MOE") != "0";
 
     // Latched once every layer's resident bundle exists (BuildFromGguf uploads them at load; prebuilt fixtures fill them lazily in the first
     // forwards, which take the per-layer-submission path): 1 = every layer takes RecordMoeDecodeFast, 2 = some layers need the general

@@ -8,7 +8,7 @@ using DotLLM.Vulkan.Kernels;
 /// #1814 decode-gap probe for Qwen3MoeHybrid files (Clover-35B-A3B, Qwen3.6-35B-A3B). Loads once, then:
 /// <c>cloverdec &lt;gguf&gt; &lt;ctx&gt; &lt;steps&gt; &lt;reps&gt; &lt;arms&gt;</c>: per rep, every arm (interleaved, ABAB order) prefills
 /// <c>ctx</c> tokens and decodes <c>steps</c> single tokens with a KV cache; tok/s per arm (min/median/max).
-/// Arms (comma list, '+' combines): base, unfused (FuseDecodeEnabled off), mixed (FuseMixedMoeDecode), head
+/// Arms (comma list, '+' combines): base, unfused (FuseDecodeEnabled off), nomixed (FuseMixedMoeDecode off; on by default), head
 /// (LM-head dispatch skipped: perturbation, logits stale).
 /// <c>cloverdec &lt;gguf&gt; bf16bench</c>: isolated LM-head-shaped BF16 GEMV, the shipped kernel's GB/s and error vs a CPU reference (a 16-byte-load NR=1/2/4/8 variant measured 200/191/139/111 GB/s against its 196: refuted, not kept).
 /// <c>cloverdec &lt;gguf&gt; dump &lt;arm&gt; &lt;out.f32&gt; [maxTokens]</c>: teacher-forced single-token decode logits of <see cref="DecodeKl.Texts"/>.
@@ -77,7 +77,7 @@ internal static class CloverDecode
     {
         var parts = arm.Split('+');
         VulkanQwen3MoeHybridTransformerModel.FuseDecodeEnabled = !parts.Contains("unfused");
-        VulkanQwen3MoeHybridTransformerModel.FuseMixedMoeDecode = parts.Contains("mixed");
+        VulkanQwen3MoeHybridTransformerModel.FuseMixedMoeDecode = !parts.Contains("nomixed");   // default on since #1817
         VulkanQwen3MoeHybridTransformerModel.PerturbSkip = parts.Contains("head") ? "head" : null;
     }
 
