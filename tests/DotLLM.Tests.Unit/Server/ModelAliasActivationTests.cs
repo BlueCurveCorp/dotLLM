@@ -204,6 +204,45 @@ public sealed class ModelAliasActivationTests : IDisposable
         Assert.Equal(_q8Path, state.LoadedModelPath);
     }
 
+    /// <summary>
+    /// #454 must hold through an alias: a disabled model that idled out is not reloaded because a request named it by its short id
+    /// (the catalog check saw only the request string; the reload branch must check the matched model's own id).
+    /// </summary>
+    [Fact]
+    public async Task DisabledIdledOutModel_RequestedByAlias_IsRefused()
+    {
+        var state = NewState();
+        Assert.Null(await state.EnsureActiveAsync(Stem, null, CancellationToken.None));
+        string id = state.Options.ModelId;
+        await state.UnloadAsync(id, all: false, CancellationToken.None);
+        state.Catalog.Disable(id);
+
+        string? error = await state.EnsureActiveAsync(Stem, null, CancellationToken.None);
+        Assert.NotNull(error);
+        Assert.Contains("Model is disabled", error);
+        Assert.Equal(1, _loads);
+        Assert.Null(state.Model);
+    }
+
+    /// <summary>#454 through an alias, stashed case: a disabled stashed model is not reactivated by its short id, and stays stashed.</summary>
+    [Fact]
+    public async Task DisabledStashedModel_RequestedByAlias_IsRefused_AndStaysStashed()
+    {
+        var state = NewState(maxResident: 2);
+        Assert.Null(await state.EnsureActiveAsync(Stem, null, CancellationToken.None));
+        string id = state.Options.ModelId;
+        Assert.Null(await state.EnsureActiveAsync(OtherStem, null, CancellationToken.None));
+        state.Catalog.Disable(id);
+        var active = state.Model;
+
+        string? error = await state.EnsureActiveAsync(Repo, null, CancellationToken.None);
+        Assert.NotNull(error);
+        Assert.Contains("Model is disabled", error);
+        Assert.Equal(2, _loads);
+        Assert.Same(active, state.Model);
+        Assert.True(state.Residency.Contains(id));
+    }
+
     /// <summary>The residency lookup matches aliases too: a stashed model requested by its short id is reactivated, not reloaded.</summary>
     [Fact]
     public async Task StashedModel_RequestedByShortId_IsReactivatedWithoutReload()

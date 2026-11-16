@@ -849,9 +849,15 @@ public sealed class ServerState : IDisposable
             if (!Catalog.IsEnabled(targetKey))
                 return $"Model is disabled: {targetKey}";
 
-            // (#1821) A stashed model is found by any of its aliases too, not only by its id.
-            var snapshot = Residency.TryTake(targetKey)
-                ?? (Residency.FindKey(s => NamesStashed(targetKey, s)) is { } stashedKey ? Residency.TryTake(stashedKey) : null);
+            // (#1821) A stashed model is found by any of its aliases too, not only by its id. The alias is not what the catalog check
+            // above saw, so the matched model's own key is checked (#454) BEFORE it is taken - a refused snapshot stays stashed.
+            var snapshot = Residency.TryTake(targetKey);
+            if (snapshot is null && Residency.FindKey(s => NamesStashed(targetKey, s)) is { } stashedKey)
+            {
+                if (!Catalog.IsEnabled(stashedKey))
+                    return $"Model is disabled: {stashedKey}";
+                snapshot = Residency.TryTake(stashedKey);
+            }
             if (snapshot is not null)
             {
                 await StopSchedulerAsync().ConfigureAwait(false);
@@ -869,7 +875,10 @@ public sealed class ServerState : IDisposable
             if (!string.IsNullOrEmpty(LoadedModelPath) && ModelProfileStore.Resolve(targetKey) is null
                 && (string.Equals(targetKey, Options.ModelId, StringComparison.OrdinalIgnoreCase) || NamesActive(targetKey)))
             {
-                // Same model as before, just idled out - reload from the same path/options.
+                // Same model as before, just idled out - reload from the same path/options. (#1821) It may have been named by an
+                // alias, which the catalog check above did not see: check its own id (#454).
+                if (!Catalog.IsEnabled(Options.ModelId))
+                    return $"Model is disabled: {Options.ModelId}";
                 reloadPath = LoadedModelPath;
                 loadOptions = Options;
                 incomingBytes = EstimatedBytes > 0 ? EstimatedBytes : SafeFileLength(reloadPath);
