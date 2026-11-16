@@ -199,7 +199,7 @@ public sealed unsafe class HipDirectWeightStore : IDisposable
             _coreModule = 0;
         }
         if (NativeLibrary.TryLoad("dstorage.dll", out _module)) return;
-        throw new DllNotFoundException("HIP direct loading requires Microsoft's dstorage.dll and dstoragecore.dll. Install DirectStorage through dotLLM or place both DLLs next to the executable; host-copy fallback is disabled.");
+        throw new DllNotFoundException("HIP direct loading requires Microsoft's dstorage.dll and dstoragecore.dll. Run 'dotllm directstorage install' in an interactive terminal to review the license and install them, or place both DLLs next to the executable; host-copy fallback is disabled.");
     }
 
     private static void CheckHr(int hr, string operation)

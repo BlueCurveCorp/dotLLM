@@ -9,18 +9,25 @@ Windows requires the AMD HIP SDK and the Visual Studio C++ build tools. Start **
 ```powershell
 $env:HIP_PATH = 'C:\Program Files\AMD\ROCm\6.4'
 $env:Path = "$env:HIP_PATH\bin;$env:Path"
-.\native\hip\build.ps1 -Architectures gfx1030
+.\native\hip\build.ps1
 ```
 
-`-Architectures gfx1030,gfx1100` builds both targets. `HIP_ARCHS` (space-separated) also selects targets; the default is `gfx1030 gfx1100`. `-HipCompiler` accepts an explicit compiler path. The script reports the compiler version and fails if compilation or source discovery fails.
+The default targets are `gfx1030 gfx1100 gfx1151`. `-Architectures` or `HIP_ARCHS`
+(space-separated) can override them. `-HipCompiler` accepts an explicit compiler
+path. Both scripts write `co/MANIFEST` with UTC time, compiler version, target list
+and SHA256 hashes for every object and source. Check that manifest after rebuilding.
 
 On Linux, with the matching ROCm toolchain on `PATH`:
 
 ```bash
-HIP_ARCHS="gfx1030 gfx1100" ./native/hip/build.sh
+./native/hip/build.sh
 ```
 
-The .NET project also rebuilds stale code objects when `hipcc` is available. `HipCompiler` and `HipOffloadArchs` are MSBuild overrides. Use `-p:RequireHipKernels=true` for native qualification: unavailable compilation of stale/missing kernels is an error. Run the native build script explicitly when changing compiler or target architectures; source timestamps alone do not identify a different toolchain.
+Ordinary .NET builds consume committed objects and never rebuild them based on
+timestamps. To rebuild explicitly, run a native script or pass
+`-p:BuildHipKernels=true`; `HipCompiler` and `HipOffloadArchs` remain overrides.
+`-p:RequireHipKernels=true` checks that all required objects exist, without compiling.
+Only `gfx1030` has been executed here; `gfx1100` and `gfx1151` are compile-only.
 
 ## Kernel contract
 
@@ -39,7 +46,9 @@ The dense kernels store F16 activations, F16 or packed weights, and independentl
 - Attention reads exactly `length` visible tokens from those pages. Query head `h` uses KV head `h / (queryHeads / kvHeads)`. It allocates no contiguous history buffer or score tensor. Head dimensions are bounded to 256; larger dimensions fail explicitly.
 - The pointers must belong to the context supplied to `DenseF16Kernels`, and allocations must cover the declared dimensions. The caller owns page-table capacity and model/token bounds.
 
-Managed model/cache creation requires `DOTLLM_HIP_ALLOW_Q8_KV=1` whenever either KV plane uses Q8_0. F16 is the default; the flag acknowledges measured precision loss rather than changing the quantizer. See [precision findings](../../docs/PRECISION.md#actual-1k8k-histories).
+Managed model/cache creation accepts Q8_0 through the standard cache options without
+an environment gate. F16 is the default. See the measured
+[precision loss](../../docs/PRECISION.md#actual-1k8k-histories).
 
 The packed overloads accept `QuantizationType` for embedding/projection and independent `KvCacheDType` values for K/V. `KvCacheDType.F32` means F16 on the GPU, following the core enum convention. The original F16 methods retain their behavior.
 
@@ -56,6 +65,13 @@ Packed embedding reads only the selected row into the F16 activation. Projection
 This primitive set does not implement Q4 KV, other quantized formats, BF16 weights, AWQ/GPTQ, hybrid/recurrent layers, or fused multi-token prefill. Unsupported format/shape overloads fail before launch.
 
 ## Qualification
+
+Review rebuild, 2026-11-16: HIP 6.4.50101 compiled `gfx1030`, `gfx1100` and
+`gfx1151` in both objects (bundle targets inspected). On RX 6900 XT, 84 HIP
+checks passed without skips, followed by both F16-rounded CPU/HIP Q8 writer
+comparisons. Hashes/toolchain are in [co/MANIFEST](co/MANIFEST). A build with newer
+source timestamps and an intentionally unavailable compiler preserved both object
+hashes; ordinary builds do not invoke native compilation.
 
 Run hardware tests with skip prevention:
 

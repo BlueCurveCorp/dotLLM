@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
+using DotLLM.Core.Tensors;
+using DotLLM.Engine.KvCache;
 using DotLLM.Hip;
 using DotLLM.Hip.Kernels;
 using Xunit;
@@ -25,6 +27,45 @@ public sealed class HipPackedKernelTests : IDisposable
             _kernels = new DenseF16Kernels(_context, _stream);
         }
         catch { _stream?.Dispose(); _context.Dispose(); throw; }
+    }
+
+    [SkippableTheory]
+    [InlineData(64)]
+    [InlineData(128)]
+    public unsafe void Q8Writer_MatchesCpuCacheAfterF16Rounding(int headDim)
+    {
+        RequireGpu();
+        const int tokens = 64, heads = 2;
+        int dim = heads * headDim, rowBytes = dim / 32 * 34;
+        using var pages = new Pages(_context!, 1, tokens * rowBytes);
+        using var rawCpu = new QuantizedKvCache(1, heads, headDim, tokens, KvCacheDType.Q8_0, KvCacheDType.Q8_0, 0);
+        using var roundedCpu = new QuantizedKvCache(1, heads, headDim, tokens, KvCacheDType.Q8_0, KvCacheDType.Q8_0, 0);
+        var random = new Random(1808);
+        int differingBytes = 0;
+        for (int position = 0; position < tokens; position++)
+        {
+            float[] raw = Enumerable.Range(0, dim).Select(_ => (float)(random.NextDouble() * 4 - 2)).ToArray();
+            Half[] half = raw.Select(value => (Half)value).ToArray();
+            float[] rounded = half.Select(value => (float)value).ToArray();
+            fixed (float* r = raw, h = rounded)
+            {
+                var rawRef = new TensorRef(1, dim, DType.Float32, -1, (nint)r);
+                var roundedRef = new TensorRef(1, dim, DType.Float32, -1, (nint)h);
+                rawCpu.Update(rawRef, rawRef, [position], 0);
+                roundedCpu.Update(roundedRef, roundedRef, [position], 0);
+            }
+            using var input = Buffer(half);
+            _kernels!.WriteKv(pages.Table.Pointer, pages.Table.Pointer, input.Pointer, input.Pointer,
+                tokens, heads, headDim, position, KvCacheDType.Q8_0, KvCacheDType.Q8_0);
+            _stream!.Synchronize();
+            byte[] expected = new ReadOnlySpan<byte>((void*)(roundedCpu.GetQuantizedKeysPtr(0) + position * rowBytes), rowBytes).ToArray();
+            Assert.Equal(expected, pages.ReadRow(0, position, rowBytes));
+            var unrounded = new ReadOnlySpan<byte>((void*)(rawCpu.GetQuantizedKeysPtr(0) + position * rowBytes), rowBytes);
+            for (int i = 0; i < rowBytes; i++)
+                if (unrounded[i] != expected[i]) differingBytes++;
+        }
+        Assert.True(differingBytes > 0, "The control must distinguish F32 inputs from F16-rounded inputs.");
+        pages.CheckGuards();
     }
 
     [SkippableTheory]

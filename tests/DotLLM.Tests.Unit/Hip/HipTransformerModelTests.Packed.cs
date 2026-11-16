@@ -41,7 +41,6 @@ public sealed partial class HipTransformerModelTests
     public void PackedModel_WithF16KvMatchesCpuAcrossPrefillDecodeAndRollback(QuantizationType type, int headDim, bool tied)
     {
         RequireGpu();
-        using var environment = new HipQ8Environment(null);
         Fixture fixture = CreateFixture(tied, matrixType: type, headDimension: headDim);
         using var model = LoadHipAndCloseMapping(fixture);
         using var oracle = new CpuOracle(DecodedReferenceFixture(fixture));
@@ -98,7 +97,6 @@ public sealed partial class HipTransformerModelTests
         QuantizationType type, KvCacheDType keyType, KvCacheDType valueType)
     {
         RequireGpu();
-        using var environment = new HipQ8Environment("1");
         Fixture fixture = CreateFixture(false, matrixType: type, headDimension: 64);
         using var model = LoadHipAndCloseMapping(fixture);
         using var oracle = new CpuOracle(DecodedReferenceFixture(fixture));
@@ -162,7 +160,6 @@ public sealed partial class HipTransformerModelTests
     public void PackedCache_RejectsQ4AndUnalignedHeadGeometryBeforeAllocatingPages()
     {
         RequireGpu();
-        using var environment = new HipQ8Environment("1");
         Fixture aligned = CreateFixture(false, matrixType: QuantizationType.Q8_0, headDimension: 32);
         using var model = LoadHipAndCloseMapping(aligned);
         Assert.Throws<NotSupportedException>(() => { using var rejected = model.CreateKvCache(128, PageTokens, KvCacheDType.Q4_0, KvCacheDType.F32); });

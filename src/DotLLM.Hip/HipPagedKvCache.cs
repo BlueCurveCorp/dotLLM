@@ -8,17 +8,6 @@ namespace DotLLM.Hip;
 /// <summary>Exclusive F16/Q8_0 KV pages allocated as a sequence grows, with device pointer tables.</summary>
 public sealed unsafe class HipPagedKvCache : IKvCache
 {
-    /// <summary>Set to exactly <c>1</c> to acknowledge experimental Q8 KV precision loss.</summary>
-    public const string Q8OptInEnvironmentVariable = "DOTLLM_HIP_ALLOW_Q8_KV";
-
-    /// <summary>Returns the Q8 acknowledgement error, or null for F16 or an explicit opt-in.</summary>
-    public static string? ExperimentalQ8Error(KvCacheDType keyType, KvCacheDType valueType)
-        => (keyType == KvCacheDType.Q8_0 || valueType == KvCacheDType.Q8_0)
-            && Environment.GetEnvironmentVariable(Q8OptInEnvironmentVariable) != "1"
-            ? $"HIP Q8_0 KV is experimental: measured precision loss failed the original 1K–8K logit quality gates. "
-                + $"Set {Q8OptInEnvironmentVariable}=1 to acknowledge this loss, or use the default F16 KV. See docs/PRECISION.md."
-            : null;
-
     private readonly HipContext _context;
     private readonly List<HipDeviceBuffer> _pages = [];
     private readonly int _layers;
@@ -50,7 +39,6 @@ public sealed unsafe class HipPagedKvCache : IKvCache
     internal HipPagedKvCache(HipContext context, int layers, int kvDimension, int maxLength, int contextLimit,
         int pageTokens = 16, KvCacheDType keyType = KvCacheDType.F32, KvCacheDType valueType = KvCacheDType.F32)
     {
-        if (ExperimentalQ8Error(keyType, valueType) is { } error) throw new NotSupportedException(error);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(layers);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(kvDimension);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxLength);
