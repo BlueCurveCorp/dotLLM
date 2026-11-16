@@ -871,7 +871,11 @@ public static class ServerStartup
         bool vulkanScheduler = vulkanKvFactory is not null && model.SupportsThreadedSequenceState
             && (string.Equals(vkSchedEnv, "1", StringComparison.Ordinal)
                 || (options.ExpectedConcurrency >= 5 && !string.Equals(vkSchedEnv, "0", StringComparison.Ordinal)));
-        if ((pagedFactory is not null || vulkanScheduler) && kvFactory is not null && draftModel is null && !mtpActive && options.PromptLookup is null)
+        // Clover block diffusion (#1828) is a TextGenerator path: the scheduler would decode those requests causally.
+        bool cloverBlock = model.Config.Clover is not null
+            && TextGenerator.ParseCloverDecodeOption(Environment.GetEnvironmentVariable("DOTLLM_CLOVER_DECODE") ?? "causal") == CloverDecodeMode.Block;
+        if ((pagedFactory is not null || vulkanScheduler) && kvFactory is not null && draftModel is null && !mtpActive && options.PromptLookup is null
+            && !cloverBlock)
         {
             var schedulerOptions = ResolveSchedulerOptions(options);
             if (vulkanScheduler)
