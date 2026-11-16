@@ -551,7 +551,7 @@ internal sealed class VulkanQwen3MoeHybridWeights : IDisposable
         {
             Parallel.For(0, rowCount, () => new float[inputDim], (r, _, row) =>
             {
-                ushort* src = (ushort*)srcPtr + (firstRow + r) * inputDim;
+                ushort* src = (ushort*)srcPtr + ((long)firstRow + r) * inputDim;   // long: vocab x dim can exceed 2^31
                 for (int i = 0; i < inputDim; i++) row[i] = BitConverter.Int32BitsToSingle(src[i] << 16);
                 Quantize.FromFloat32(row, inputDim, QuantizationType.Q8_0, new Span<byte>((byte*)chunkPtr + r * rowBytes, checked((int)rowBytes)));
                 return row;
