@@ -619,6 +619,18 @@ into the contiguous scratch (`PrepareAttentionScratch`).
   `cuMemcpy2DAsync` only when `CudaKvBlockTable.Version` changes: a new block (every 16 tokens), a
   copy-on-write, a seed, a fork or a free. The #200 version did two synchronous H2D copies per layer per
   token, about 17 ms per token at 40 layers.
+- **Kernel V loop.** `attention_f16_paged` walks the tile one block run at a time. The #200 loop did a
+  runtime-divisor div/mod and a dependent block-pointer load on every serial iteration, which cost
+  about 8 ms per token at 686 tokens and 46 ms at 4,030.
+- **Measured (RTX 3060, TwIL-8B Q4_K_M, `run -n 64`, 2 runs each):**
+
+  | prompt | gather (before) | paged in place | non-paged |
+  |---|---|---|---|
+  | 670 tokens | 7.8 tok/s | 32.1-32.3 | 34.4-34.7 |
+  | 4,020 tokens | 1.6 | 14.2 | 17.3 |
+
+  Greedy text is identical across all three at both lengths. The remaining gap at 4K is the paged
+  kernel itself (#1270); attention at depth is slow for both paths (#1682).
 
 **Still not wired**: `ContinuousBatchScheduler`'s own paged-pool-aware preemption/prefix-trie logic
 (`pagedPool:` parameter) is CPU-`KvBlockPool`-typed and does not drive `CudaPagedKvCache` — CUDA
