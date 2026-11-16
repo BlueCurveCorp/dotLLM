@@ -529,25 +529,6 @@ internal sealed class VulkanQwen3MoeHybridWeights : IDisposable
     }
 
     /// <summary>
-    /// Uploads one projection matrix from an unmanaged source pointer. Keeps
-    /// the source quant bytes verbatim on device when the contraction axis
-    /// alignment permits, otherwise dequantises to F32 on the host before
-    /// upload.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>Zero-copy fast path (issue #508).</b> This helper is the upload path for
-    /// <i>four</i> models — Bonsai 2 27B and the Qwen3 hybrid dense stack via
-    /// <c>VulkanQwen3HybridDenseWeights</c>, Qwen3-MoE-hybrid here, and (through its own
-    /// copy of the same shape) Nemotron-H — and until #508 every one of them staged
-    /// unconditionally, leaving the bytes resident twice on a UMA APU. When the device
-    /// image is the source bytes verbatim, <see cref="VulkanWeightImportPolicy"/> aliases
-    /// the mmap'd pages instead; the staging copy below is the fallback. The widening
-    /// branches cannot import — their device image is a host dequant of the source, not
-    /// the source — so they stage and register the dead source range for #438.
-    /// </para>
-    /// </remarks>
-    /// <summary>
     /// #1816 (user-approved, opt-in): a BF16 LM head is requantized to Q8_0 at load (<c>DOTLLM_VK_LMHEAD_BF16_TO_Q8=1</c>). The head is the
     /// largest per-token read of a decode (Clover-35B-A3B: [248320 x 2048] BF16 = 1.02 GB, 5.0 ms/token at ~200 GB/s; Q8_0 is 0.54 GB).
     /// A narrower re-encoding, not an expansion; the logits change by Q8_0's rounding. Off by default: BF16 stays exact.
@@ -584,6 +565,25 @@ internal sealed class VulkanQwen3MoeHybridWeights : IDisposable
         return buf;
     }
 
+    /// <summary>
+    /// Uploads one projection matrix from an unmanaged source pointer. Keeps
+    /// the source quant bytes verbatim on device when the contraction axis
+    /// alignment permits, otherwise dequantises to F32 on the host before
+    /// upload.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Zero-copy fast path (issue #508).</b> This helper is the upload path for
+    /// <i>four</i> models — Bonsai 2 27B and the Qwen3 hybrid dense stack via
+    /// <c>VulkanQwen3HybridDenseWeights</c>, Qwen3-MoE-hybrid here, and (through its own
+    /// copy of the same shape) Nemotron-H — and until #508 every one of them staged
+    /// unconditionally, leaving the bytes resident twice on a UMA APU. When the device
+    /// image is the source bytes verbatim, <see cref="VulkanWeightImportPolicy"/> aliases
+    /// the mmap'd pages instead; the staging copy below is the fallback. The widening
+    /// branches cannot import — their device image is a host dequant of the source, not
+    /// the source — so they stage and register the dead source range for #438.
+    /// </para>
+    /// </remarks>
     internal static unsafe VulkanDevice.Buffer UploadProjectionMatrix(
         VulkanDevice device, VulkanStagingBuffer staging,
         nint srcPtr, QuantizationType qt, int outputDim, int inputDim,
