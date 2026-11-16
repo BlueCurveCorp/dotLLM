@@ -5016,11 +5016,9 @@ public sealed unsafe partial class CudaKernels : IDisposable
                         &poArg, &swArg};
 
         int numBlocks = seqQ * numHeads;
-        // LaunchAttention's layout (q_shared+score_tile+out_accum+warp_scratch), plus the
-        // per-tile K and V block-pointer staging (#1839): 2 x (TileKv + 1) pointers.
+        // Same shared-memory layout/size as LaunchAttention (q_shared+score_tile+out_accum+warp_scratch).
         const int TileKv = 256;
-        uint sharedBytes = (uint)((headDim + TileKv + headDim + 32) * sizeof(float)
-                                  + 2 * (TileKv + 1) * sizeof(nint));
+        uint sharedBytes = (uint)((headDim + TileKv + headDim + 32) * sizeof(float));
 
         CudaDriverApi.cuLaunchKernel(_attentionPagedFunc,
                 (uint)numBlocks, 1, 1, BlockSize, 1, 1,
