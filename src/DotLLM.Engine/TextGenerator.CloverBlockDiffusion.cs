@@ -150,9 +150,12 @@ public sealed partial class TextGenerator
                 prefillTicks = decodeStart - t0;
             }
 
+            CloverBlockTurn? previous = null;
             foreach (var turn in decoder.Blocks(promptIds, maxTokens, kvCache, Prefill))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                commitTicks += previous?.CommitTicks ?? 0;   // the previous block was committed just before this one was resolved
+                previous = turn;
                 var resolved = turn.Block;
                 blocks++;
                 steps += resolved.Steps.Count;
@@ -190,7 +193,6 @@ public sealed partial class TextGenerator
                     }
                     yield return new GenerationToken(token, detok.TakeDelta(flushIncomplete: false), null);
                 }
-                commitTicks += turn.CommitTicks;
                 if (generatedIds.Count >= maxTokens)
                 {
                     long end = Stopwatch.GetTimestamp();
