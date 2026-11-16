@@ -5,7 +5,8 @@ namespace DotLLM.Vulkan.Kernels;
 /// <summary>
 /// The two GDN kernels of Clover's bidirectional block preview (#1815): <c>clover_bd_conv_silu_f32</c> (causal conv over the clean conv
 /// state plus the in-block right conv, SiLU; the state is only read) and <c>clover_bd_softmax_f32</c> (per-head softmax over the block
-/// plus the read-only history bucket). Everything else in the preview forward reuses the causal path's kernels.
+/// plus the read-only history bucket), plus the block expert coreset mask <c>clover_moe_coreset_f32</c> (#1828: in place on the router
+/// logits before the causal top-k). Everything else in the preview forward reuses the causal path's kernels.
 /// </summary>
 /// <remarks>Both read and write only existing F32 GDN scratch; the softmax row lives in shared memory (<c>T + 1</c> floats).</remarks>
 public sealed class CloverBlockPreviewKernels : IDisposable
@@ -23,12 +24,17 @@ public sealed class CloverBlockPreviewKernels : IDisposable
     private const int SoftmaxPushBytes = 4 * sizeof(uint) + 2 * sizeof(float);
     private const int ConvBuffers = 6;
     private const int SoftmaxBuffers = 9;
+    private const int CoresetPushBytes = 3 * sizeof(uint) + sizeof(float);
+    private const int CoresetBuffers = 1;
+
+    /// <summary>Largest expert count the coreset kernel supports (one thread per expert).</summary>
+    public const int MaxCoresetExperts = 256;
 
     private readonly VulkanDevice _device;
-    private readonly VulkanModule _convModule, _softmaxModule;
-    private readonly ComputePipeline _conv, _softmax;
-    private readonly nint _convPool, _softmaxPool;
-    private readonly DescriptorSetCache _convCache, _softmaxCache;
+    private readonly VulkanModule _convModule, _softmaxModule, _coresetModule;
+    private readonly ComputePipeline _conv, _softmax, _coreset;
+    private readonly nint _convPool, _softmaxPool, _coresetPool;
+    private readonly DescriptorSetCache _convCache, _softmaxCache, _coresetCache;
     private bool _disposed;
 
     private CloverBlockPreviewKernels(VulkanDevice device, string spvDir)
@@ -40,6 +46,9 @@ public sealed class CloverBlockPreviewKernels : IDisposable
         _softmaxPool = KernelSupport.CreateDescriptorPool(device, buffersPerSet: SoftmaxBuffers);
         _convCache = new DescriptorSetCache(device, _convPool, _conv, buffersPerSet: ConvBuffers);
         _softmaxCache = new DescriptorSetCache(device, _softmaxPool, _softmax, buffersPerSet: SoftmaxBuffers);
+        (_coresetModule, _coreset) = Load(device, spvDir, "clover_moe_coreset_f32", CoresetBuffers, CoresetPushBytes);
+        _coresetPool = KernelSupport.CreateDescriptorPool(device, buffersPerSet: CoresetBuffers);
+        _coresetCache = new DescriptorSetCache(device, _coresetPool, _coreset, buffersPerSet: CoresetBuffers);
     }
 
     private static (VulkanModule, ComputePipeline) Load(VulkanDevice device, string spvDir, string name, int buffers, int pushBytes)
@@ -69,6 +78,30 @@ public sealed class CloverBlockPreviewKernels : IDisposable
     {
         _convCache.Reset();
         _softmaxCache.Reset();
+        _coresetCache.Reset();
+    }
+
+    /// <summary>
+    /// Records the block expert coreset (#1828) in place on <paramref name="routerLogits"/> <c>[rows, numExperts]</c>: the experts outside
+    /// the subset covering <paramref name="topP"/> of the block's aggregated top-<paramref name="k"/> routing mass are masked in every row
+    /// (see <c>MoeSwiGluMlp.ApplyBlockCoreset</c>, the CPU reference). Record between the router matmul and the top-k softmax.
+    /// </summary>
+    public unsafe void RecordCoreset(nint cmdBuf, VulkanDevice.Buffer routerLogits, int rows, int numExperts, int k, float topP)
+    {
+        if (rows <= 0) throw new ArgumentOutOfRangeException(nameof(rows));
+        if (numExperts <= 0 || numExperts > MaxCoresetExperts) throw new ArgumentOutOfRangeException(nameof(numExperts));
+        if (k <= 0 || k > numExperts) throw new ArgumentOutOfRangeException(nameof(k));
+        if (!(topP > 0f && topP <= 1f)) throw new ArgumentOutOfRangeException(nameof(topP));
+        if (routerLogits.Size < (long)rows * numExperts * sizeof(float)) throw new ArgumentException("router logits buffer too small.", nameof(routerLogits));
+
+        Span<nint> buffers = stackalloc nint[CoresetBuffers] { routerLogits.Handle };
+        nint set = _coresetCache.GetOrCreate(buffers);
+        VulkanApi.vkCmdBindPipeline(cmdBuf, VkPipelineBindPoint.Compute, _coreset.Pipeline);
+        VulkanApi.vkCmdBindDescriptorSets(cmdBuf, VkPipelineBindPoint.Compute, _coreset.Layout, 0, 1, set, 0, 0);
+        Span<uint> pc = stackalloc uint[4] { (uint)rows, (uint)numExperts, (uint)k, BitConverter.SingleToUInt32Bits(topP) };
+        fixed (uint* p = pc)
+            VulkanApi.vkCmdPushConstants(cmdBuf, _coreset.Layout, VkShaderStageFlags.Compute, 0, CoresetPushBytes, (nint)p);
+        VulkanApi.vkCmdDispatch(cmdBuf, 1, 1, 1);
     }
 
     /// <summary>Records <c>output = silu(causal_conv([state | qkv]) + right_conv(qkv))</c> over <paramref name="seqLen"/> block rows.</summary>
@@ -142,9 +175,12 @@ public sealed class CloverBlockPreviewKernels : IDisposable
         _disposed = true;
         if (_convPool != 0) VulkanApi.vkDestroyDescriptorPool(_device.Handle, _convPool, 0);
         if (_softmaxPool != 0) VulkanApi.vkDestroyDescriptorPool(_device.Handle, _softmaxPool, 0);
+        if (_coresetPool != 0) VulkanApi.vkDestroyDescriptorPool(_device.Handle, _coresetPool, 0);
         _conv.Dispose();
         _softmax.Dispose();
         _convModule.Dispose();
         _softmaxModule.Dispose();
+        _coreset.Dispose();
+        _coresetModule.Dispose();
     }
 }

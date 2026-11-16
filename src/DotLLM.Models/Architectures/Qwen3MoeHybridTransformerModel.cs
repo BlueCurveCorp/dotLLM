@@ -1633,7 +1633,7 @@ public sealed unsafe partial class Qwen3MoeHybridTransformerModel : IModel, DotL
     /// <see cref="MoeLayerWeights.SharedExpertGate"/>). When that gate is absent the call degenerates
     /// to the routed-only Mixtral path.
     /// </remarks>
-    private void ForwardMoeBody(MoeLayerWeights moe, int layer, int seqLen, int hiddenSize, float* normOut)
+    private void ForwardMoeBody(MoeLayerWeights moe, int layer, int seqLen, int hiddenSize, float* normOut, float blockCoresetTopP = 0f)
     {
         int numExperts = moe.NumExperts;
         int numExpertsPerTok = moe.NumExpertsPerTok;
@@ -1663,7 +1663,8 @@ public sealed unsafe partial class Qwen3MoeHybridTransformerModel : IModel, DotL
             numExpertsPerTok: numExpertsPerTok,
             hiddenSize: hiddenSize,
             seqLen: seqLen,
-            normTopKProb: moe.NormTopKProb);
+            normTopKProb: moe.NormTopKProb,
+            blockCoresetTopP: blockCoresetTopP);
 
         // Phase 2: per-expert SwiGLU directly against the raw GGUF quant view (no per-call
         // dequant). When the load path didn't populate the raw view (synthetic F32 fixtures,

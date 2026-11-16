@@ -32,4 +32,10 @@ public sealed record CloverConfig
 
     /// <summary>Routing-mass fraction the coreset keeps (<c>clover_moe.moe_block_coreset_top_p</c>, 0.9). Unused on the causal path.</summary>
     public required float MoeBlockCoresetTopP { get; init; }
+
+    /// <summary>
+    /// The coreset top_p the block preview applies (#1828), or 0 when the coreset is off. Read only by the preview forwards; the causal
+    /// forward never routes through the coreset.
+    /// </summary>
+    public float PreviewCoresetTopP => MoeBlockCoresetEnabled && MoeBlockCoresetTopP > 0f ? MathF.Min(MoeBlockCoresetTopP, 1f) : 0f;
 }

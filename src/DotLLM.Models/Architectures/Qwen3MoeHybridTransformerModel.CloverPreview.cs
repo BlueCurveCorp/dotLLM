@@ -71,6 +71,7 @@ public sealed unsafe partial class Qwen3MoeHybridTransformerModel : ICloverBlock
         float* residual = (float*)_state.Residual;
         float* normOut = (float*)_state.NormOutput;
 
+        float coresetTopP = clover.PreviewCoresetTopP;
         EmbedTokens(blockTokenIds, hidden, hiddenSize);
         try
         {
@@ -97,7 +98,7 @@ public sealed unsafe partial class Qwen3MoeHybridTransformerModel : ICloverBlock
                 for (int t = 0; t < T; t++)
                     RmsNorm.Execute(new ReadOnlySpan<float>(hidden + t * hiddenSize, hiddenSize), lw.PostAttnNormWeight, eps,
                                     new Span<float>(normOut + t * hiddenSize, hiddenSize));
-                ForwardMoeBody(lw.Moe, layer, T, hiddenSize, normOut);
+                ForwardMoeBody(lw.Moe, layer, T, hiddenSize, normOut, coresetTopP);
                 for (int t = 0; t < T; t++)
                     Add.Execute(new ReadOnlySpan<float>(residual + t * hiddenSize, hiddenSize), new ReadOnlySpan<float>(normOut + t * hiddenSize, hiddenSize),
                                 new Span<float>(hidden + t * hiddenSize, hiddenSize));

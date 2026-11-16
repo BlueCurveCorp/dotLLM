@@ -12,8 +12,8 @@ namespace DotLLM.Vulkan;
 /// The causal per-layer-submission forward with two substitutions: GDN layers record <see cref="RecordGdnPreviewLayer"/> (the causal
 /// projections and decay, then <c>clover_bd_conv_silu_f32</c> and <c>clover_bd_softmax_f32</c> against the committed state, which no
 /// kernel writes), and attention layers attend the whole prefix and block (<see cref="AttentionMaskMode.Bidirectional"/> on the per-token
-/// kernel; the block's K/V are parked at cache rows <c>[start, start + T)</c> and rolled back). Embedding, MoE and the LM head are the
-/// causal path's, so the decode-fused path, MTP capture and verify snapshots are never involved.
+/// kernel; the block's K/V are parked at cache rows <c>[start, start + T)</c> and rolled back). Embedding, MoE (plus the block expert
+/// coreset mask between the router and the top-k, #1828) and the LM head are the causal path's, so the decode-fused path, MTP capture and verify snapshots are never involved.
 /// </para>
 /// <para>
 /// Device memory: the four preview tensors per GDN layer are uploaded on the first preview (F32 as stored:
@@ -148,6 +148,7 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : ICloverBlockP
         _submit.SubmitAndWait();
 
         var kinds = _layout.LayerKind;
+        float coresetTopP = clover.PreviewCoresetTopP;   // the block expert coreset (#1828), in every MoE layer of the preview
         try
         {
             for (int layer = 0; layer < _cpuLayers.Length; layer++)
@@ -162,8 +163,8 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : ICloverBlockP
                 KernelSupport.ComputeToHostBarrier(cmdBuf);
                 _submit.SubmitAndWait();
 
-                if (_cpuMoeLayer[layer]) RunCpuPlacedMoeLayer(layer, layerBuf, T, hiddenSize, eps);
-                else RunGpuPlacedMoeLayer(layer, lw, layerBuf, T, hiddenSize, eps);
+                if (_cpuMoeLayer[layer]) RunCpuPlacedMoeLayer(layer, layerBuf, T, hiddenSize, eps, coresetTopP);
+                else RunGpuPlacedMoeLayer(layer, lw, layerBuf, T, hiddenSize, eps, coresetTopP);
             }
         }
         finally
