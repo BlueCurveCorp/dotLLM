@@ -529,11 +529,11 @@ internal sealed class VulkanQwen3MoeHybridWeights : IDisposable
     }
 
     /// <summary>
-    /// #1816 (user-approved, opt-in): a BF16 LM head is requantized to Q8_0 at load (<c>DOTLLM_VK_LMHEAD_BF16_TO_Q8=1</c>). The head is the
+    /// #1816: a BF16 LM head is requantized to Q8_0 at load, ON by default (James, #1829; <c>DOTLLM_VK_LMHEAD_BF16_TO_Q8=0</c> keeps exact BF16). The head is the
     /// largest per-token read of a decode (Clover-35B-A3B: [248320 x 2048] BF16 = 1.02 GB, 5.0 ms/token at ~200 GB/s; Q8_0 is 0.54 GB).
-    /// A narrower re-encoding, not an expansion; the logits change by Q8_0's rounding. Off by default: BF16 stays exact.
+    /// A narrower re-encoding, not an expansion; the logits change by Q8_0's rounding (mean KL 5-8e-5 vs BF16, top-1 99.7-99.8%).
     /// </summary>
-    internal static bool LmHeadBf16ToQ8 { get; set; } = Environment.GetEnvironmentVariable("DOTLLM_VK_LMHEAD_BF16_TO_Q8") == "1";
+    internal static bool LmHeadBf16ToQ8 { get; set; } = Environment.GetEnvironmentVariable("DOTLLM_VK_LMHEAD_BF16_TO_Q8") != "0";
 
     /// <summary>
     /// Requantizes a row-major BF16 matrix to Q8_0 (ggml <c>quantize_row_q8_0</c>) straight into the mapped staging chunks and uploads it.
@@ -559,7 +559,7 @@ internal sealed class VulkanQwen3MoeHybridWeights : IDisposable
         });
         long srcBytes = (long)outputDim * inputDim * 2;
         Console.Error.WriteLine(
-            $"[dotLLM] Vulkan LM head BF16 -> Q8_0 at load (DOTLLM_VK_LMHEAD_BF16_TO_Q8=1, #1816): [{outputDim} x {inputDim}] " +
+            $"[dotLLM] Vulkan LM head BF16 -> Q8_0 at load (default; DOTLLM_VK_LMHEAD_BF16_TO_Q8=0 keeps BF16, #1816): [{outputDim} x {inputDim}] " +
             $"{srcBytes / 1048576.0:F0} MiB -> {uploadedBytes / 1048576.0:F0} MiB in {sw.Elapsed.TotalMilliseconds:F0} ms " +
             $"(staging chunks of {staging.Capacity / 1048576.0:F0} MiB, one {inputDim}-float row per worker; no other host copy)");
         return buf;
