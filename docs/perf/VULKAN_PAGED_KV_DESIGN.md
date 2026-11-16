@@ -40,8 +40,9 @@ Facts, each read from the tree:
     host-side free list and refcounts, `SeedSharedBlocks` / `SnapshotFullBlocks` / `EnsureWritable`.
   - Default attention **gathers each layer's blocks into a contiguous scratch** (`PrepareAttentionScratch`). That is
     the expansion CLAUDE.md rule 2 calls a defect.
-  - `attention_f16_paged` (#200) is opt-in (`DOTLLM_ATTN_PAGED_NATIVE=1`), decode only, plain kernel only, and does two
-    synchronous H2D pointer-array copies per layer per token (#1270). Prefill always gathers.
+  - `attention_f16_paged` (#200) is the decode default since #1839 (`DOTLLM_ATTN_PAGED_NATIVE=0` opts out), plain kernel
+    only, with pointer arrays uploaded once per table change rather than per layer per token. The gather it replaced
+    cost ~30 µs per D2D copy on an RTX 3060, 5x slower decode at 686 tokens. Prefill always gathers.
   - Serving is still single-request: `ServerStartup.cs` passes `pagedFactory = null` for CUDA, because
     `ContinuousBatchScheduler(pagedPool:)` and `PrefixTrieManager` are typed to the CPU `KvBlockPool` /
     `PagedKvCache`.

@@ -2,6 +2,14 @@
 
 **Issue:** #200
 **Author:** dotnet-perf-expert agent, 2026-08-01
+> **Update (issue #1839, 2026-11-16): now the default for decode.** Measured on an RTX 3060 (framework,
+> TwIL-8B Q4_K_M, 670-token prompt): the gather path decoded at 6.8 tok/s against 34.7 non-paged, a
+> fixed ~30 µs per `cuMemcpyDtoDAsync` x ~3,440 copies per token. This kernel as shipped by #200
+> reached 21.6 tok/s; its two synchronous per-layer H2D pointer copies were the rest. #1839 keeps the
+> kernel and PTX unchanged, uploads every layer's pointer arrays together only when the block table's
+> version changes, and fuses the decode RoPE + KV write (`CudaPagedKvCache.FusedRopeAndUpdateDevice`).
+> `DOTLLM_ATTN_PAGED_NATIVE=0` opts out. See `docs/KV_CACHE.md`'s CUDA section for the numbers.
+
 **Status:** Implemented (2026-08-02, opt-in via `DOTLLM_ATTN_PAGED_NATIVE=1`, default OFF pending
 real-hardware measurement) — see the "Update (issue #200, implemented 2026-08-02)" note directly
 below for what shipped. Originally design-only, confirming and extending the two prior comments on

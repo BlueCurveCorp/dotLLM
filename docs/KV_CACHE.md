@@ -492,7 +492,7 @@ only plans (`TryPlan` / `Commit`); each backend carries out the move.
 
 ## Paged KV-Cache
 
-Inspired by OS virtual memory paging. This is the **memory management** half of PagedAttention (vLLM): block-based allocation, ref counting, CoW. The **kernel** half (attention reading non-contiguous blocks directly) is the default on CPU since #1268 (the attention kernel reads F16/Q8_0 blocks in place, prefill and decode) and opt-in on CUDA as of issue #200 (`DOTLLM_ATTN_PAGED_NATIVE=1`, decode only — see the CUDA section below; #1270 tracks the CUDA follow-up). Any future Vulkan paged cache still needs it.
+Inspired by OS virtual memory paging. This is the **memory management** half of PagedAttention (vLLM): block-based allocation, ref counting, CoW. The **kernel** half (attention reading non-contiguous blocks directly) is the default on CPU since #1268 (the attention kernel reads F16/Q8_0 blocks in place, prefill and decode) and the default for CUDA decode since #1839 (issue #200's kernel; `DOTLLM_ATTN_PAGED_NATIVE=0` opts out; prefill still gathers — see the CUDA section below; #1270 tracks the CUDA follow-up). Any future Vulkan paged cache still needs it.
 
 ### Why
 
@@ -600,17 +600,25 @@ GPU-resident mirror of the above, in `DotLLM.Cuda`:
   longer the `IModel` per-sequence-loop default — so `ContinuousBatchScheduler`-driven multi-sequence
   decode on CUDA runs through this cache's dispatch too, not just single-sequence `run`/`chat`.
 
-**Issue #200 (opt-in, default OFF)**: a direct block-table-read decode attention kernel,
-`attention_f16_paged`, now exists alongside the default gather-into-scratch path — see
-`docs/perf/CUDA_PAGED_ATTENTION_DESIGN.md` for the full design/implementation note. Set
-`DOTLLM_ATTN_PAGED_NATIVE=1` to enable it. It reads K/V rows through a small per-layer array of
-block base device pointers (`CudaPagedKvCache.PrepareNativeBlockPtrs`) instead of gathering KV
-bytes into a contiguous scratch buffer first (`PrepareAttentionScratch`), eliminating that D2D copy
-on the decode hot path. Restricted to decode (`seqLen == 1`); prefill still uses the gather-based
-path (G3/flash prefill kernels need a contiguous buffer regardless). Default remains the
-gather-based dispatch — this kernel is unmeasured on real hardware as of this writing (see the
-design doc's "What's still unverified" section) and is deliberately opt-in per this project's
-"don't ship an unvalidated kernel as the default" convention.
+**Decode reads the pool in place (issue #200's kernel, default since #1839)**: single-token decode
+uses `attention_f16_paged`, which reads K/V rows through per-layer arrays of block base device
+pointers (`CudaPagedKvCache.PrepareNativeBlockPtrs`), and writes the new row with
+`CudaPagedKvCache.FusedRopeAndUpdateDevice` (one `fused_rope_kv_write_f16` launch at the block base +
+offset-in-block, the same kernel the contiguous cache uses). `DOTLLM_ATTN_PAGED_NATIVE=0` restores the
+gather path for both. Prefill (`seqLen > 1`), layers with attention sinks and stale PTX still gather
+into the contiguous scratch (`PrepareAttentionScratch`).
+
+- **Why the gather was the bottleneck (#1839).** The gather issued two `cuMemcpyDtoDAsync` per block
+  per layer per step. TwIL-8B (40 layers, block size 16) at 686 tokens is 43 blocks, so about 3,440
+  copies per token. On an RTX 3060 under WDDM each one costs about 30 µs whatever its size. That is
+  about 110 ms per token, which took decode from 34.7 to 6.8 tok/s. The bytes moved (about 110 MB
+  per token) would take well under 1 ms. The cost grows with context: at 4,030 tokens it was 1.7 tok/s
+  against 17.3 non-paged.
+- **Pointer-array upload.** All layers' K and V pointers live in one pinned host array and one device
+  array (`[kv][layer][maxBlocks]`). They are rebuilt and uploaded with one stream-ordered
+  `cuMemcpy2DAsync` only when `CudaKvBlockTable.Version` changes: a new block (every 16 tokens), a
+  copy-on-write, a seed, a fork or a free. The #200 version did two synchronous H2D copies per layer per
+  token, about 17 ms per token at 40 layers.
 
 **Still not wired**: `ContinuousBatchScheduler`'s own paged-pool-aware preemption/prefix-trie logic
 (`pagedPool:` parameter) is CPU-`KvBlockPool`-typed and does not drive `CudaPagedKvCache` — CUDA
@@ -645,10 +653,9 @@ dotllm serve model.gguf --no-ui
   `PrepareAttentionScratch(layerIndex, stream)` instead.
 - CUDA paged KV-cache is not wired into `ContinuousBatchScheduler`'s paged-pool-aware preemption —
   see the CUDA section above.
-- CUDA has an opt-in direct block-table-read decode attention kernel now (issue #200,
-  `DOTLLM_ATTN_PAGED_NATIVE=1`, see the CUDA section above and
-  `docs/perf/CUDA_PAGED_ATTENTION_DESIGN.md`), but it defaults OFF pending real-hardware
-  measurement, and it only covers CUDA decode (#1270). CPU's `PagedKvCache` reads blocks directly
+- CUDA decode reads paged blocks in place by default since #1839 (issue #200's kernel, see the CUDA
+  section above and `docs/perf/CUDA_PAGED_ATTENTION_DESIGN.md`). CUDA prefill still gathers, and the
+  paged kernel has no sink epilogue or sliding-window tile skip yet (#1270). CPU's `PagedKvCache` reads blocks directly
   since #1268; a future Vulkan paged cache would need its own kernel (see `docs/ROADMAP.md`'s "Paged
   attention kernels" row).
 
