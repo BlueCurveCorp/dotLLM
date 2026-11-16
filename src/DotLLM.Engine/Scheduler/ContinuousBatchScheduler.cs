@@ -7,6 +7,7 @@ using System.Threading.Channels;
 using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Constraints;
+using DotLLM.Core.Diagnostics;
 using DotLLM.Core.Models;
 using DotLLM.Core.Sampling;
 using DotLLM.Core.Tensors;
@@ -298,6 +299,7 @@ public sealed class ContinuousBatchScheduler : IBatchScheduler, IDisposable
         {
             // Submitted on the request's flow: keep its log scope for the timing line the run loop writes (#1288).
             LogContext = RequestTimingLog.CaptureContext(),
+            Progress = RequestProgress.Current,   // (#1822) on the request's flow, like LogContext
         };
 
         // Stop strings match on decoded text, so give this sequence a detokenizer to produce one
@@ -1166,6 +1168,7 @@ public sealed class ContinuousBatchScheduler : IBatchScheduler, IDisposable
         for (int i = 0; i < count; i++)
         {
             var p = _prefillReady[i];
+            p.Seq.Progress?.BeginPrefill(p.Seq.PromptLength, p.ForwardStart);   // (#1822)
             for (int t = 0; t < p.ForwardLen; t++)
                 _prefillPositions[off + t] = p.ForwardStart + t;
             _prefillBatch.Add(new SequenceForwardRequest
@@ -1243,6 +1246,10 @@ public sealed class ContinuousBatchScheduler : IBatchScheduler, IDisposable
                 var seq = p.Seq;
                 long fwdStart = Stopwatch.GetTimestamp();
                 ITensor logits;
+                // (#1822) Per-layer progress from a CPU forward into this sequence's counters (the batched path above reports per step).
+                var tracker = PrefillTracker.Create(pulse: null, seq.Progress);
+                tracker?.BeginChunk(p.ForwardLen);
+                var previousTarget = tracker is null ? null : ForwardProgress.Swap(tracker);
                 try
                 {
                     // Issue #493: FinishPrefill below samples row Shape[0]-1 only, and a
@@ -1269,6 +1276,10 @@ public sealed class ContinuousBatchScheduler : IBatchScheduler, IDisposable
                     seq.Fail(ex);
                     posOff += p.ForwardLen;
                     continue;
+                }
+                finally
+                {
+                    if (tracker is not null) ForwardProgress.Swap(previousTarget);
                 }
                 seq.PrefillTicks += Stopwatch.GetTimestamp() - fwdStart;
                 pulse?.Advance(p.ForwardLen);
@@ -1304,6 +1315,7 @@ public sealed class ContinuousBatchScheduler : IBatchScheduler, IDisposable
     /// </summary>
     private void FinishPrefill(SchedulerRequest seq, ITensor logits)
     {
+        seq.Progress?.BeginDecode(seq.GeneratedTokens);   // (#1822) prefill done; status reads the generated count from here on
         int vocabSize = _model.Config.VocabSize;
         unsafe
         {

@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Constraints;
 using DotLLM.Core.Lora;
+using DotLLM.Core.Diagnostics;
 using DotLLM.Core.Models;
 using DotLLM.Core.Sampling;
 using DotLLM.Core.Tensors;
@@ -571,6 +572,9 @@ public sealed partial class TextGenerator
             int prefillLen = promptLen - prefillStart;
 
             int firstTokenId;
+            // (#1822) Live counters for /v1/status: null (free) unless the server installed them on this request's flow.
+            var requestProgress = RequestProgress.Current;
+            requestProgress?.BeginPrefill(promptLen, prefillStart);
             long ts0 = EngineClock.GetTimestamp();
 
             using (var prefillSpan = telemetry.StartPrefill())
@@ -671,6 +675,7 @@ public sealed partial class TextGenerator
 
             // Check stop conditions for first token
             generatedIds.Add(firstTokenId);
+            requestProgress?.BeginDecode(generatedIds);   // (#1822) status reads the list's count from here on
             detok.Append(firstTokenId);
 
             ReadOnlySpan<char> firstTail = detok.GetTailView(stopTailSize, stopScratch);
@@ -1150,6 +1155,9 @@ public sealed partial class TextGenerator
 
             int firstTokenId;
             TokenLogprobInfo? firstLogprobInfo = null;
+            // (#1822) Live counters for /v1/status: null (free) unless the server installed them on this request's flow.
+            var requestProgress = RequestProgress.Current;
+            requestProgress?.BeginPrefill(promptLen, prefillStart);
             long ts0 = EngineClock.GetTimestamp();
 
             using (var prefillSpan = telemetry.StartPrefill())
@@ -1241,6 +1249,7 @@ public sealed partial class TextGenerator
 
             // Check stop conditions for first token
             generatedIds.Add(firstTokenId);
+            requestProgress?.BeginDecode(generatedIds);   // (#1822) status reads the list's count from here on
             detok.Append(firstTokenId);
 
             var stopResult = CheckStopConditions(stopConditions, firstTokenId, generatedIds,
@@ -2405,6 +2414,10 @@ public sealed partial class TextGenerator
         int[] positionsArray = ArrayPool<int>.Shared.Rent(chunkSize);
         ITensor? logits = null;
         PrefillPulse? pulse = RequestTimingLog.BeginPrefill(prefillLen); // null (free) unless timing logs are on (#1288)
+        // (#1822) One tracker feeds the log pulse and /v1/status from the same count: per chunk, and per layer inside a CPU forward
+        // (ForwardProgress), so a single-forward CPU prefill no longer reads 0/N until it ends. Null (no allocation) when both are off.
+        var tracker = PrefillTracker.Create(pulse, RequestProgress.Current);
+        var previousTarget = tracker is null ? null : ForwardProgress.Swap(tracker);
         int end = prefillStart + prefillLen;
         try
         {
@@ -2429,6 +2442,7 @@ public sealed partial class TextGenerator
                     positions[i] = prefillStart + offset + i;
 
                 logits?.Dispose();
+                tracker?.BeginChunk(len);
                 // Issue #493: this driver samples row Shape[0]-1 of the LAST chunk and nothing
                 // else — every earlier chunk's logits are disposed unread, and within the last
                 // chunk only the final row is read. So opt in to last-row-only logits. Models that
@@ -2439,7 +2453,7 @@ public sealed partial class TextGenerator
                 offset += len;
 
                 // Forward returned host logits, so the device has finished this chunk: count completed work, not queued.
-                pulse?.Advance(len);
+                tracker?.EndChunk();
                 int reached = prefillStart + offset;
                 if (onCheckpoint is not null
                     && (reached == snapshotAt || stepTokens > 0 && reached < end && reached % stepTokens == 0
@@ -2455,6 +2469,7 @@ public sealed partial class TextGenerator
         }
         finally
         {
+            if (tracker is not null) ForwardProgress.Swap(previousTarget);
             pulse?.Dispose();
             ArrayPool<int>.Shared.Return(positionsArray);
         }

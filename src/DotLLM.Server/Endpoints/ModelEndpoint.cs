@@ -45,6 +45,9 @@ public static class ModelEndpoint
             ExpiresInSeconds = m.ExpiresInSeconds,
             SizeBytes = m.EstimatedBytes,
             Meta = m.Meta,
+            Device = m.Device,                                                   // (#1822)
+            DeviceFallback = m.Device is null ? null : m.DeviceFallbackReason is not null,
+            DeviceFallbackReason = m.DeviceFallbackReason,
         }).ToArray();
 
         if (data.Length == 0)

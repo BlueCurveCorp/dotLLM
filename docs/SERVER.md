@@ -419,6 +419,31 @@ disposed or different model.
 | `loading_*` | the load target, its start (UTC ISO 8601), elapsed seconds and triggering request; null when not loading |
 | `busy_*` | the lock holder (`req#N generate`, `req#N model activation`, `idle sweep`, ...), since when, elapsed; null when free |
 | `waiting_requests` | requests queued for the lock |
+| `device` | the device the active model runs on (`cpu`, `vulkan`, `gpu:0`; the resolved one for `--device auto`); null when no model is ready (#1822) |
+| `device_fallback` / `device_fallback_reason` | `true` and the reason (failed devices, errors, the performance consequence) when `--device auto` fell back to the CPU after a faster device failed to load the model; `false` / null otherwise (#1822) |
+| `prefill_tokens_done` / `prefill_tokens_total` / `decode_tokens` | the **oldest** in-flight request's live progress (mirrors `requests[0]`); null when nothing is in flight (#1822) |
+| `requests` | every in-flight request, oldest first, or null: `request` (`req#N`), `phase` (`waiting`, `prefill`, `decode`), `elapsed_seconds`, `prompt_tokens`, `cached_tokens` (prefix-cache hits), `prefill_tokens_done` / `prefill_tokens_total` (computed tokens, hits excluded), `decode_tokens` (#1822) |
+
+**Live progress (#1822).** The counters move *during* the work, so a client can tell slow from wedged:
+- On the direct path, `prefill_tokens_done` advances per prefill chunk. On the **CPU** it also advances per **layer** inside a forward, because a
+  CPU prefill is a single forward pass. The CPU layer loops of the dense transformer (Llama, Mistral, Qwen, Phi, Gemma, ...) and the
+  qwen35 hybrid-dense model (Bonsai-2, Qwen3.5/3.6 dense) report it. Other CPU architectures, such as MoE hybrids, Nemotron-H, Mamba-3 and
+  LFM2, still advance per chunk only.
+- On a GPU, a forward records its layers before the device runs them, so progress there is per chunk: completed work, never queued work.
+- On the continuous-batch scheduler path, a single-sequence prefill gets the same per-layer progress; a batched prefill step advances when the
+  step returns.
+- `decode_tokens` counts tokens as they are sampled.
+
+The engine pays nothing for this: a few integer writes per chunk, one thread-static null check per layer, and no allocation per token.
+The 3 s `prefill: N/M tokens` log line reads the same counter, so a CPU prefill no longer logs `0/N (0.0%)` until it finishes.
+
+**CPU fallback over HTTP (#1822).** Besides `/v1/status`, every `GET /v1/models` entry carries `device`, `device_fallback` and (when it fell
+back) `device_fallback_reason`. Every `/v1/*` and `/api/*` response carries an `X-DotLLM-Device: <device>` header, plus
+`X-DotLLM-Device-Fallback: true` after a fallback. The warning travels with its model: an on-demand load triggered by a request records
+its own fallback, or clears the previous one, and a stashed model brings its warning back when it is reactivated. Before #1822 only the
+startup load's warning was kept. The headers are set when the response starts. A streaming response that commits early (an SSE keep-alive
+sent while a load is still running) therefore names the device of the model that was active before that load. `/v1/status` always shows
+the current device.
 
 During the activation hand-off (a request that just loaded a model keeps first use of it for up to 30 s, so a waiter for another model
 does not swap it away and force a reload) `/v1/status` reports `busy` with `busy_with: "req#N (activated <id>, preparing to generate)"`,

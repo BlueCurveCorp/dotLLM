@@ -187,7 +187,7 @@ public static class ServerStartup
             try
             {
                 var explicitState = LoadModelCore(resolvedPath, options with { Device = canonical });
-                explicitState.Options = explicitState.Options with { ResolvedDevice = canonical };
+                explicitState.Options = explicitState.Options with { ResolvedDevice = canonical, DeviceFallbackWarning = null };   // (#1822) never a stale warning
                 return explicitState;
             }
             catch (Exception ex) when (spec.IsGpu && ex is not (DeviceUnavailableException or InvalidServerOptionException))
@@ -211,7 +211,7 @@ public static class ServerStartup
             {
                 Console.WriteLine($"[dotllm] --device auto: trying {device}");
                 var loaded = LoadModelCore(resolvedPath, options with { Device = device });
-                loaded.Options = loaded.Options with { Device = options.Device, ResolvedDevice = device };
+                loaded.Options = loaded.Options with { Device = options.Device, ResolvedDevice = device, DeviceFallbackWarning = null };   // (#1822) set below when it fell back
                 if (device == "cpu" && (gpuFailures.Count > 0 || autoPlan.CpuWarning is not null))
                 {
                     // Auto on the CPU always warns: after a failed GPU load (reason + consequence), or because no GPU was servable at all.
@@ -1115,6 +1115,9 @@ public static class ServerStartup
 
         // (#1021) "[dotllm] req#N POST /v1/chat/completions" ... "done 200 in 3.2s" / "cancelled after 600.0s".
         app.UseRequestLifecycleLog();
+
+        // (#1822) X-DotLLM-Device (+ X-DotLLM-Device-Fallback) on /v1/* and /api/* responses: a CPU fallback is visible over HTTP.
+        DeviceHeaders.Use(app, state);
 
         // (#1023) A request whose admitted model was swapped out while it queued, and could not be re-activated: 503 / in-stream error.
         ModelUnavailableException.UseModelUnavailableHandler(app);

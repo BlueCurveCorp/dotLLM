@@ -93,6 +93,12 @@ public sealed record ResidentModelInfo
 
     /// <summary>llama.cpp-shaped model metadata for <c>/v1/models</c> (#1289); null when unavailable.</summary>
     public Models.ModelMetaDto? Meta { get; init; }
+
+    /// <summary>The device this model runs on (the resolved one for <c>auto</c>) (#1822).</summary>
+    public string? Device { get; init; }
+
+    /// <summary>Why <c>--device auto</c> put this model on the CPU after a faster device failed; null when it did not (#1822).</summary>
+    public string? DeviceFallbackReason { get; init; }
 }
 
 /// <summary>
@@ -258,6 +264,8 @@ public sealed class ModelResidencyManager : IDisposable
                     EstimatedBytes = s.EstimatedBytes,
                     ExpiresInSeconds = expiresIn,
                     Meta = ModelMeta.Build(s.Config, s.CurrentGguf),
+                    Device = s.Options.ResolvedDevice ?? s.Options.Device,   // (#1822)
+                    DeviceFallbackReason = s.Options.DeviceFallbackWarning,
                 };
             }).ToList();
         }

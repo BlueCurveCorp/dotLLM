@@ -63,6 +63,21 @@ public sealed record ModelInfoDto
     [JsonPropertyName("meta")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ModelMetaDto? Meta { get; init; }
+
+    /// <summary>The device this model runs on (<c>cpu</c>, <c>vulkan</c>, <c>gpu:0</c>; the resolved one for <c>auto</c>) (#1822). Omitted when not loaded.</summary>
+    [JsonPropertyName("device")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Device { get; init; }
+
+    /// <summary>True when <c>--device auto</c> fell back to the CPU after a faster device failed to load it (#1822). Omitted when not loaded.</summary>
+    [JsonPropertyName("device_fallback")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? DeviceFallback { get; init; }
+
+    /// <summary>Why it fell back (the failed devices and errors, and the performance consequence) (#1822); omitted when it did not.</summary>
+    [JsonPropertyName("device_fallback_reason")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DeviceFallbackReason { get; init; }
 }
 
 /// <summary>

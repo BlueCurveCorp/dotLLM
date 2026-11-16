@@ -54,4 +54,68 @@ public sealed record ServerStatusResponse
     /// <summary>Requests waiting for the execution lock.</summary>
     [JsonPropertyName("waiting_requests")]
     public int WaitingRequests { get; init; }
+
+    /// <summary>The device the active model runs on (<c>cpu</c>, <c>vulkan</c>, <c>gpu:0</c>; the resolved one for <c>auto</c>) (#1822). Null when no model is ready.</summary>
+    [JsonPropertyName("device")]
+    public string? Device { get; init; }
+
+    /// <summary>True when <c>--device auto</c> fell back to the CPU after a faster device failed to load the model (#1822). Null when no model is ready.</summary>
+    [JsonPropertyName("device_fallback")]
+    public bool? DeviceFallback { get; init; }
+
+    /// <summary>Why it fell back (#1822); null when it did not.</summary>
+    [JsonPropertyName("device_fallback_reason")]
+    public string? DeviceFallbackReason { get; init; }
+
+    /// <summary>The oldest in-flight request's computed prompt tokens finished so far (#1822); null when nothing is in flight.</summary>
+    [JsonPropertyName("prefill_tokens_done")]
+    public int? PrefillTokensDone { get; init; }
+
+    /// <summary>The oldest in-flight request's prompt tokens to compute (prefix-cache hits excluded) (#1822).</summary>
+    [JsonPropertyName("prefill_tokens_total")]
+    public int? PrefillTokensTotal { get; init; }
+
+    /// <summary>The oldest in-flight request's decoded tokens so far (#1822).</summary>
+    [JsonPropertyName("decode_tokens")]
+    public int? DecodeTokens { get; init; }
+
+    /// <summary>Every in-flight request's progress, oldest first (#1822); null when nothing is in flight.</summary>
+    [JsonPropertyName("requests")]
+    public InFlightRequestStatus[]? Requests { get; init; }
+}
+
+/// <summary>One in-flight request's live progress in <c>GET /v1/status</c> (#1822).</summary>
+public sealed record InFlightRequestStatus
+{
+    /// <summary>The request's log tag (<c>req#12</c>), when it has one.</summary>
+    [JsonPropertyName("request")]
+    public string? Request { get; init; }
+
+    /// <summary><c>waiting</c> (admitted, no prefill yet), <c>prefill</c>, or <c>decode</c>.</summary>
+    [JsonPropertyName("phase")]
+    public string? Phase { get; init; }
+
+    /// <summary>Seconds since the request started running.</summary>
+    [JsonPropertyName("elapsed_seconds")]
+    public double? ElapsedSeconds { get; init; }
+
+    /// <summary>Tokens in the prompt, prefix-cache hits included.</summary>
+    [JsonPropertyName("prompt_tokens")]
+    public int? PromptTokens { get; init; }
+
+    /// <summary>Prompt tokens reused from the prefix cache.</summary>
+    [JsonPropertyName("cached_tokens")]
+    public int? CachedTokens { get; init; }
+
+    /// <summary>Computed prompt tokens finished so far (per layer inside a CPU forward, per chunk otherwise).</summary>
+    [JsonPropertyName("prefill_tokens_done")]
+    public int? PrefillTokensDone { get; init; }
+
+    /// <summary>Prompt tokens this prefill computes (prefix-cache hits excluded).</summary>
+    [JsonPropertyName("prefill_tokens_total")]
+    public int? PrefillTokensTotal { get; init; }
+
+    /// <summary>Tokens decoded so far.</summary>
+    [JsonPropertyName("decode_tokens")]
+    public int? DecodeTokens { get; init; }
 }

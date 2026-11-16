@@ -55,8 +55,21 @@ public sealed class ServerState : IDisposable
     internal InFlightScope BeginRequest()
     {
         Interlocked.Increment(ref _inFlight);
-        return new InFlightScope(this);
+        // (#1822) Live counters for /v1/status, made current on this request's flow: the engine (TextGenerator, or the scheduler at
+        // submission) picks them up from there. One small object per request; nothing per token.
+        var progress = new RequestProgress(ServerLog.RequestTag);
+        _inFlightProgress.TryAdd(progress, 0);
+        var previous = RequestProgress.Current;
+        RequestProgress.Current = progress;
+        return new InFlightScope(this, progress, previous);
     }
+
+    /// <summary>The progress counters of every in-flight request (#1822).</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<RequestProgress, byte> _inFlightProgress = new();
+
+    /// <summary>The in-flight requests' counters, oldest first (#1822).</summary>
+    internal IReadOnlyList<RequestProgress> InFlightProgress =>
+        _inFlightProgress.Keys.OrderBy(p => p.StartedUtc).ToArray();
 
     /// <summary>
     /// <see cref="ContinuousBatchSchedulerService.EnqueueAsync"/> held in flight (#1606): the scheduler paths take neither the request
@@ -69,13 +82,18 @@ public sealed class ServerState : IDisposable
     }
 
     /// <summary>Handle returned by <see cref="BeginRequest"/>.</summary>
-    internal sealed class InFlightScope(ServerState owner) : IDisposable
+    internal sealed class InFlightScope(ServerState owner, RequestProgress progress, RequestProgress? previous) : IDisposable
     {
         private ServerState? _owner = owner;
+
+        /// <summary>This request's live counters (#1822).</summary>
+        public RequestProgress Progress { get; } = progress;
 
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _owner, null) is not { } o) return;
+            o._inFlightProgress.TryRemove(Progress, out _);
+            if (ReferenceEquals(RequestProgress.Current, Progress)) RequestProgress.Current = previous;
             o.LastUsedUtc = o.Now;                  // stamp BEFORE the decrement: the sweep must never see 0 in flight with a stale stamp
             Interlocked.Decrement(ref o._inFlight);
         }
@@ -182,8 +200,23 @@ public sealed class ServerState : IDisposable
     /// <summary>Server startup options (updated on model swap).</summary>
     public required ServerOptions Options { get; set; }
 
-    /// <summary>Set when <c>--device auto</c> had to fall back to the CPU after a GPU load failed (#733); surfaced via /props.</summary>
-    public string? DeviceFallbackWarning { get; set; }
+    /// <summary>
+    /// Set when <c>--device auto</c> had to fall back to the CPU after a GPU load failed (#733); surfaced via <c>/props</c>, and
+    /// (#1822) <c>/v1/status</c>, <c>/v1/models</c> and the <c>X-DotLLM-Device-Fallback</c> header.
+    /// </summary>
+    /// <remarks>
+    /// Stored on <see cref="ServerOptions.DeviceFallbackWarning"/> (#1822), so it travels with the model: a chat-triggered reload,
+    /// a stash and a reactivation all carry their own model's warning. It used to live on the state only and was dropped by every
+    /// on-demand load, which is exactly when a <c>--device auto</c> reload silently landed on the CPU.
+    /// </remarks>
+    public string? DeviceFallbackWarning
+    {
+        get => Options.DeviceFallbackWarning;
+        set => Options = Options with { DeviceFallbackWarning = value };
+    }
+
+    /// <summary>The device the active model runs on (<c>cpu</c>, <c>vulkan</c>, <c>gpu:0</c>): the resolved one for <c>auto</c> (#1822).</summary>
+    public string ActiveDevice => Options.ResolvedDevice ?? Options.Device;
 
     /// <summary>Model configuration (null when no model loaded).</summary>
     public ModelConfig? Config { get; set; }
@@ -573,6 +606,8 @@ public sealed class ServerState : IDisposable
         long heldTicks = Interlocked.Read(ref _gateHeldSinceTicks);
         DateTimeOffset? heldSince = holder is not null && heldTicks > 0 ? new DateTimeOffset(heldTicks, TimeSpan.Zero) : null;
         bool ready = IsReady && Model is not null;
+        var requests = InFlightProgress;                         // (#1822) oldest first
+        var first = requests.Count > 0 ? requests[0] : null;
 
         // (#1023 review) During an activation hand-off the gate is briefly free, but the server is not idle: the activating request is
         // rendering its prompt and others are yielding to it.
@@ -595,6 +630,23 @@ public sealed class ServerState : IDisposable
             BusySince = heldSince,
             BusyElapsedSeconds = heldSince is { } s ? Math.Round((now - s).TotalSeconds, 1) : null,
             WaitingRequests = Volatile.Read(ref _gateWaiters),
+            Device = ready ? ActiveDevice : null,
+            DeviceFallback = ready ? DeviceFallbackWarning is not null : null,
+            DeviceFallbackReason = ready ? DeviceFallbackWarning : null,
+            PrefillTokensDone = first?.PrefillTokensDone,
+            PrefillTokensTotal = first?.PrefillTokensTotal,
+            DecodeTokens = first?.DecodeTokens,
+            Requests = requests.Count == 0 ? null : requests.Select(p => new Models.InFlightRequestStatus
+            {
+                Request = p.Tag,
+                Phase = p.Phase,
+                ElapsedSeconds = Math.Round((now - p.StartedUtc).TotalSeconds, 1),
+                PromptTokens = p.PromptTokens,
+                CachedTokens = p.CachedTokens,
+                PrefillTokensDone = p.PrefillTokensDone,
+                PrefillTokensTotal = p.PrefillTokensTotal,
+                DecodeTokens = p.DecodeTokens,
+            }).ToArray(),
         };
     }
 
@@ -980,6 +1032,8 @@ public sealed class ServerState : IDisposable
                 EstimatedBytes = EstimatedBytes,
                 ExpiresInSeconds = expiresIn,
                 Meta = ModelMeta.Build(Config, CurrentGguf),
+                Device = ActiveDevice,                          // (#1822)
+                DeviceFallbackReason = DeviceFallbackWarning,
             });
         }
         result.AddRange(Residency.Snapshot(now));
