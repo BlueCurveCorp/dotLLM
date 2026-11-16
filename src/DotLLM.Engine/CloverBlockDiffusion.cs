@@ -31,6 +31,19 @@ public readonly record struct CloverDenoiseStep(int[] Filled, int[] Tokens, bool
 /// <param name="SelectTicks">Stopwatch ticks spent in the host-side prediction / confidence / transfer.</param>
 public sealed record CloverResolvedBlock(int[] Tokens, IReadOnlyList<CloverDenoiseStep> Steps, long PreviewTicks, long SelectTicks);
 
+/// <summary>One resolved block handed to the consumer of <see cref="CloverBlockDiffusion.Blocks"/>.</summary>
+/// <param name="Block">The resolved block.</param>
+/// <param name="Remaining">How many of its tokens belong to the response (the budget may end inside the block).</param>
+/// <param name="Position">Position of the block's first token.</param>
+public sealed record CloverBlockTurn(CloverResolvedBlock Block, int Remaining, int Position)
+{
+    /// <summary>Set by the consumer when a returned token ended the generation: the block is then not committed.</summary>
+    public bool Stop { get; set; }
+
+    /// <summary>Stopwatch ticks of this block's causal commit (0 until it ran).</summary>
+    public long CommitTicks { get; internal set; }
+}
+
 /// <summary>Result of <see cref="CloverBlockDiffusion.Generate"/>.</summary>
 /// <param name="Response">The committed continuation (EOS included when one stopped it).</param>
 /// <param name="Blocks">Every resolved block, in order.</param>
@@ -187,37 +200,62 @@ public sealed class CloverBlockDiffusion
     }
 
     /// <summary>
-    /// HF <c>generate</c> end to end: prefill, blocks, EOS stop after full block resolution, causal commit between blocks. The KV cache
-    /// must be empty and hold <see cref="RequiredKvLength"/> positions; the model-owned recurrent state is reset first.
+    /// The block loop every caller drives (HF <c>generate</c>'s control flow): resets the model-owned recurrent state, commits the prompt,
+    /// then per block resolves it and yields a <see cref="CloverBlockTurn"/>. The consumer reads the first
+    /// <see cref="CloverBlockTurn.Remaining"/> tokens and sets <see cref="CloverBlockTurn.Stop"/> if one of them ended the
+    /// generation; otherwise, on the next iteration, the block is committed causally and the next one is resolved. The stopped block and
+    /// the last block of the budget are never committed. The KV cache must be empty and hold <see cref="RequiredKvLength"/> positions.
     /// </summary>
-    public CloverGenerationResult Generate(ReadOnlySpan<int> prompt, int maxNewTokens, IKvCache kvCache, IReadOnlyCollection<int> eosTokenIds)
+    /// <param name="prompt">Prompt ids (at least one).</param>
+    /// <param name="maxNewTokens">Token budget.</param>
+    /// <param name="kvCache">An empty KV cache.</param>
+    /// <param name="prefill">Optional prompt commit (e.g. a chunked prefill); default <see cref="Commit"/> at position 0.</param>
+    public IEnumerable<CloverBlockTurn> Blocks(int[] prompt, int maxNewTokens, IKvCache kvCache, Action<int[], IKvCache>? prefill = null)
     {
-        if (prompt.IsEmpty) throw new ArgumentException("The prompt must have at least one token.", nameof(prompt));
+        if (prompt.Length == 0) throw new ArgumentException("The prompt must have at least one token.", nameof(prompt));
         ArgumentOutOfRangeException.ThrowIfNegative(maxNewTokens);
         if (kvCache.CurrentLength != 0) throw new ArgumentException("The KV cache must be empty.", nameof(kvCache));
-        _model.ResetSequenceState();
+        return Iterate();
+
+        IEnumerable<CloverBlockTurn> Iterate()
+        {
+            if (maxNewTokens == 0) yield break;
+            _model.ResetSequenceState();
+            if (prefill is not null) prefill(prompt, kvCache);
+            else Commit(prompt, 0, kvCache);
+            int committed = prompt.Length, produced = 0;
+            while (produced < maxNewTokens)
+            {
+                int remaining = Math.Min(BlockSize, maxNewTokens - produced);
+                var turn = new CloverBlockTurn(ResolveBlock(kvCache, committed), remaining, committed);
+                yield return turn;
+                produced += remaining;
+                if (turn.Stop || produced >= maxNewTokens) yield break;
+                long c0 = Stopwatch.GetTimestamp();
+                Commit(turn.Block.Tokens.AsSpan(0, remaining), committed, kvCache);
+                turn.CommitTicks = Stopwatch.GetTimestamp() - c0;
+                committed += remaining;
+            }
+        }
+    }
+
+    /// <summary>
+    /// HF <c>generate</c> end to end over <see cref="Blocks"/>: stops on an <paramref name="eosTokenIds"/> id, after full block
+    /// resolution, keeping the EOS and dropping what follows it.
+    /// </summary>
+    public CloverGenerationResult Generate(int[] prompt, int maxNewTokens, IKvCache kvCache, IReadOnlyCollection<int> eosTokenIds)
+    {
         var response = new List<int>(maxNewTokens);
         var blocks = new List<CloverResolvedBlock>();
-        if (maxNewTokens == 0) return new CloverGenerationResult([], blocks, false);
-
-        Commit(prompt, 0, kvCache);
-        int committed = prompt.Length;
         bool stopped = false;
-        while (response.Count < maxNewTokens && !stopped)
+        foreach (var turn in Blocks(prompt, maxNewTokens, kvCache))
         {
-            int remaining = Math.Min(BlockSize, maxNewTokens - response.Count);
-            var resolved = ResolveBlock(kvCache, committed);
-            blocks.Add(resolved);
-            for (int i = 0; i < remaining; i++)
+            blocks.Add(turn.Block);
+            for (int i = 0; i < turn.Remaining; i++)
             {
-                int token = resolved.Tokens[i];
+                int token = turn.Block.Tokens[i];
                 response.Add(token);
-                if (eosTokenIds.Contains(token)) { stopped = true; break; }
-            }
-            if (response.Count < maxNewTokens && !stopped)
-            {
-                Commit(resolved.Tokens.AsSpan(0, remaining), committed, kvCache);
-                committed += remaining;
+                if (eosTokenIds.Contains(token)) { stopped = turn.Stop = true; break; }
             }
         }
         return new CloverGenerationResult(response.ToArray(), blocks, stopped);

@@ -120,6 +120,10 @@ public sealed partial class TextGenerator
             new MaxTokensStopCondition(maxTokens),
             .. StopStringCondition.CreateAll(options),
         ];
+        // HF stops on generation_config eos_token_id = [<|im_end|>, <|endoftext|>]; the GGUF's EOS is only <|im_end|>, and block
+        // diffusion fills block tails with <|endoftext|> (the pad id), which would otherwise be returned (and committed) as text.
+        if (options.StopConditions is null && _model.Config.Clover is { PadTokenId: >= 0 } cc)
+            stopConditions.Insert(1, new EosStopCondition(cc.PadTokenId));
         int stopTailSize = ComputeStopTailSize(stopConditions);
         char[] stopScratch = ArrayPool<char>.Shared.Rent(stopTailSize);
 
@@ -131,32 +135,35 @@ public sealed partial class TextGenerator
         long kvBytes = GetKvCacheBytes(kvCache);
         var generatedIds = new List<int>(maxTokens);
         var detok = new IncrementalDetokenizer(_tokenizer, initialCapacity: Math.Max(64, maxTokens * 4));
-        long prefillTicks, previewTicks = 0, selectTicks = 0, commitTicks = 0;
+        long prefillTicks = 0, previewTicks = 0, selectTicks = 0, commitTicks = 0;
         int blocks = 0, steps = 0;
-        long decodeStart;
+        long decodeStart = 0;
         try
         {
-            long t0 = Stopwatch.GetTimestamp();
-            ForwardPrefill(promptIds, 0, promptLen, kvCache, adapter: null, cancellationToken: cancellationToken).Dispose();
-            decodeStart = Stopwatch.GetTimestamp();
-            prefillTicks = decodeStart - t0;
+            // The loop itself (prompt commit, block resolution, causal commit between blocks) is CloverBlockDiffusion.Blocks, the one the
+            // HF oracle and the mutants exercise; this consumer only applies the request's stop conditions and streams.
+            void Prefill(int[] ids, Core.Attention.IKvCache kv)
+            {
+                long t0 = Stopwatch.GetTimestamp();
+                ForwardPrefill(ids, 0, ids.Length, kv, adapter: null, cancellationToken: cancellationToken).Dispose();
+                decodeStart = Stopwatch.GetTimestamp();
+                prefillTicks = decodeStart - t0;
+            }
 
-            int committed = promptLen;
-            while (true)
+            foreach (var turn in decoder.Blocks(promptIds, maxTokens, kvCache, Prefill))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                int remaining = Math.Min(decoder.BlockSize, maxTokens - generatedIds.Count);
-                var resolved = decoder.ResolveBlock(kvCache, committed);
+                var resolved = turn.Block;
                 blocks++;
                 steps += resolved.Steps.Count;
                 previewTicks += resolved.PreviewTicks;
                 selectTicks += resolved.SelectTicks;
                 if (CloverTrace)
-                    Console.Error.WriteLine($"[clover] block {blocks} @{committed}: " + string.Join(" ", resolved.Steps.Select(s =>
+                    Console.Error.WriteLine($"[clover] block {blocks} @{turn.Position}: " + string.Join(" ", resolved.Steps.Select(s =>
                         "[" + string.Join(",", s.Filled.Select((pos, n) => $"{pos}:{s.Tokens[n]}")) + (s.Fallback ? "]*" : "]"))));
 
                 // HF: stop only after the whole block resolved; tokens past the stop are dropped.
-                for (int i = 0; i < remaining; i++)
+                for (int i = 0; i < turn.Remaining; i++)
                 {
                     int token = resolved.Tokens[i];
                     generatedIds.Add(token);
@@ -164,6 +171,7 @@ public sealed partial class TextGenerator
                     var stop = CheckStopConditions(stopConditions, token, generatedIds, detok.GetTailView(stopTailSize, stopScratch));
                     if (stop != StopResult.Continue)
                     {
+                        turn.Stop = true;
                         long end = Stopwatch.GetTimestamp();
                         LastCloverBlockStats = Stats(end);
                         if (stop == StopResult.Stop)
@@ -182,6 +190,7 @@ public sealed partial class TextGenerator
                     }
                     yield return new GenerationToken(token, detok.TakeDelta(flushIncomplete: false), null);
                 }
+                commitTicks += turn.CommitTicks;
                 if (generatedIds.Count >= maxTokens)
                 {
                     long end = Stopwatch.GetTimestamp();
@@ -191,10 +200,6 @@ public sealed partial class TextGenerator
                                                      GeneratedTokenCount: generatedIds.Count);
                     yield break;
                 }
-                long c0 = Stopwatch.GetTimestamp();
-                decoder.Commit(resolved.Tokens.AsSpan(0, remaining), committed, kvCache);
-                commitTicks += Stopwatch.GetTimestamp() - c0;
-                committed += remaining;
             }
         }
         finally

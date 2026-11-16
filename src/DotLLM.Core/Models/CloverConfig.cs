@@ -34,6 +34,13 @@ public sealed record CloverConfig
     public required float MoeBlockCoresetTopP { get; init; }
 
     /// <summary>
+    /// <c>tokenizer.ggml.padding_token_id</c> (<c>&lt;|endoftext|&gt;</c>, 248044 in the official file), or -1. HF's generation config
+    /// stops on it as well as on <c>&lt;|im_end|&gt;</c> (<c>eos_token_id: [248046, 248044]</c>), and block diffusion fills block tails
+    /// with it, so block-diffusion decoding (#1828) adds it to the stop set.
+    /// </summary>
+    public int PadTokenId { get; init; } = -1;
+
+    /// <summary>
     /// The coreset top_p the block preview applies (#1828), or 0 when the coreset is off. Read only by the preview forwards; the causal
     /// forward never routes through the coreset.
     /// </summary>

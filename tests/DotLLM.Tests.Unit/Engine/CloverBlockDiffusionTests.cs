@@ -166,6 +166,59 @@ public sealed class CloverBlockDiffusionTests
         Assert.True(result.Blocks[^1].Tokens.Length == Block);        // the stopped block was fully resolved before the stop
     }
 
+    private sealed class StubTokenizer : DotLLM.Tokenizers.ITokenizer
+    {
+        public int VocabSize => Vocab;
+        public int BosTokenId => 1;
+        public int EosTokenId => 0;
+        public int[] Encode(string text) => [3, 4, 5];
+        public string Decode(ReadOnlySpan<int> tokenIds) => string.Join(" ", tokenIds.ToArray().Select(i => $"t{i}"));
+        public string DecodeToken(int tokenId) => $"t{tokenId} ";
+        public int CountTokens(string text) => 3;
+    }
+
+    /// <summary>
+    /// The shipped path: <see cref="TextGenerator"/> in block mode (what <c>run</c> / <c>chat</c> / <c>serve</c> call) returns the same
+    /// ids as <see cref="CloverBlockDiffusion.Generate"/> and makes the same causal commits.
+    /// </summary>
+    [Fact]
+    public void TextGenerator_BlockMode_MatchesTheDecoder()
+    {
+        var reference = new ScriptedClover();
+        using (var kv = Kv())
+            _ = new CloverBlockDiffusion(reference).Generate([3, 4, 5], 10, kv, [Vocab + 100]);
+        var refIds = reference.Commits.Skip(1).SelectMany(c => c.Tokens).ToList();
+
+        var model = new ScriptedClover();
+        var generator = new TextGenerator(model, new StubTokenizer()) { CloverDecode = CloverDecodeMode.Block };
+        var response = generator.Generate("prompt", new InferenceOptions { MaxTokens = 10, Temperature = 0f });
+        Assert.Equal(10, response.GeneratedTokenIds.Length);
+        Assert.Equal(refIds, response.GeneratedTokenIds.Take(8));
+        Assert.Equal(reference.Commits.Select(c => (c.Start, string.Join(",", c.Tokens))),
+                     model.Commits.Select(c => (c.Start, string.Join(",", c.Tokens))));
+        Assert.Equal(3, generator.LastCloverBlockStats!.Value.Blocks);
+    }
+
+    [Fact]
+    public void TextGenerator_CausalByDefault()
+    {
+        var model = new ScriptedClover();
+        var generator = new TextGenerator(model, new StubTokenizer());
+        Assert.Equal(CloverDecodeMode.Causal, generator.CloverDecode);
+    }
+
+    /// <summary>Sampling with top-k 1 is greedy, whatever the temperature and seed.</summary>
+    [Fact]
+    public void Sampling_TopK1_EqualsGreedy()
+    {
+        using var kv1 = Kv();
+        using var kv2 = Kv();
+        var greedy = new CloverBlockDiffusion(new ScriptedClover()).Generate([3, 4, 5], 12, kv1, [Vocab + 100]);
+        var sampled = new CloverBlockDiffusion(new ScriptedClover(), sampling: new CloverBlockSampling(1.3f, TopK: 1, Seed: 7))
+            .Generate([3, 4, 5], 12, kv2, [Vocab + 100]);
+        Assert.Equal(greedy.Response, sampled.Response);
+    }
+
     [Fact]
     public void Coreset_KeepsTheExpertsCoveringTopP()
     {
