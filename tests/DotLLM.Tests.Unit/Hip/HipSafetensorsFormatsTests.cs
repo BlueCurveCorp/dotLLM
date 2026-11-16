@@ -161,10 +161,13 @@ public sealed class HipSafetensorsFormatsTests(ITestOutputHelper output)
     {
         RequireGpu();
         var fixture = TestFixtureResolver.ResolveDirectory([$"DOTLLM_TEST_TINYLLAMA_{format}"], "TheBloke",
-            $"TinyLlama-1.1B-Chat-v1.0-{format}", ["model.safetensors", "config.json", "packed-reference.json"], null);
-        Skip.If(!fixture.Found, fixture.SkipMessage("TinyLlama packed checkpoint and independently generated Hugging Face reference"));
+            $"TinyLlama-1.1B-Chat-v1.0-{format}", ["model.safetensors", "config.json"], null);
+        Skip.If(!fixture.Found, fixture.SkipMessage("TinyLlama packed checkpoint"));
+        string oraclePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".dotllm", "test-cache", "packed-oracles", expectedHash + ".json");
+        Skip.IfNot(File.Exists(oraclePath), $"Generate {oraclePath} with tests/scripts/generate_packed_hf_reference.py {fixture.Path}");
         VerifyHash(Path.Combine(fixture.Path!, "model.safetensors"), expectedHash);
-        using var reference = JsonDocument.Parse(File.ReadAllText(Path.Combine(fixture.Path!, "packed-reference.json")));
+        using var reference = JsonDocument.Parse(File.ReadAllText(oraclePath));
         Assert.Equal(expectedHash, reference.RootElement.GetProperty("model_sha256").GetString());
         Assert.Equal("4.51.3", reference.RootElement.GetProperty("transformers").GetString());
         Assert.Equal(string.Equals(format, "AWQ", StringComparison.Ordinal) ? "65eab3eabe3f55e300ffbab5feac59c49322d985f42dcda4e2288859fb9a4abe"

@@ -64,6 +64,11 @@ Packed embedding reads only the selected row into the F16 activation. Projection
 
 SafeTensors AWQ GEMM4 and legacy GPTQ4 projection reads the original qweight, F16 scales, qzeros and optional GPTQ group-index buffers. Each matrix holds `K*N/2` qweight bytes, `2*groups*N` scale bytes and `groups*N/2` zero bytes; GPTQ also retains `4*K` group-index bytes. AWQ uses its producer nibble permutation. GPTQ packs along K, adds one to stored zero points and follows validated group indices. No wider matrix is stored. The managed loader validates these layouts and supported group sizes before allocating.
 
+The packed SafeTensors kernel prioritizes correctness: each output walks K and
+re-reads group scales/zero points, with strided AWQ access. It has no tiled GEMM,
+cooperative scale reuse or fused multi-token prefill. Numerical qualification is
+not a throughput claim; profile representative shapes before tuning these paths.
+
 This primitive set does not implement Q4 KV, quantized formats outside the stated subset, hybrid/recurrent layers, or fused multi-token prefill. Unsupported format/shape overloads fail before launch.
 
 ## Qualification
@@ -71,9 +76,26 @@ This primitive set does not implement Q4 KV, quantized formats outside the state
 Review rebuild, 2026-11-16: HIP 6.4.50101 compiled `gfx1030`, `gfx1100` and
 `gfx1151` in both objects (bundle targets inspected). On RX 6900 XT, 84 HIP
 checks passed without skips, followed by both F16-rounded CPU/HIP Q8 writer
-comparisons. Hashes/toolchain are in [co/MANIFEST](co/MANIFEST). A build with newer
+comparisons. That pre-SafeTensors dense object had SHA256
+`5272a90fbefc925b13d863a939d632b355da3362791718c1bcb23df84a07d536`.
+A build with newer
 source timestamps and an intentionally unavailable compiler preserved both object
 hashes; ordinary builds do not invoke native compilation.
+
+The subsequent format-enabled rebuild passed **123/123** HIP kernel, cache,
+transformer, real SafeTensors and application-loading checks, with zero skips on
+the same RX 6900 XT. Dense SHA256:
+`c6212821b0c94262c4d32a687708641caafeabfef63ac7236ddb02baa3907c18`;
+RMSNorm SHA256:
+`29b6e3fda6a3fc29b9776b0a0c99684c1cbad94b1101e94e63d2801ab59cfb54`.
+The exact compiler, source hashes and all three targets are in
+[co/MANIFEST](co/MANIFEST). `DOTLLM_TEST_HIP_REQUIRED=1` prevented GPU skips.
+
+The earlier 2026-11-14 PR extraction run reported 99 passing checks and logged a
+native rebuild, but did not capture its output hash. Its exact tested binary
+cannot be established from that log. The then-committed `5BB968AF...` object below
+must not be presented as the measured binary for those 99 checks. The new
+hash-bound run above supersedes that unbound qualification claim.
 
 Run hardware tests with skip prevention:
 

@@ -82,6 +82,7 @@ extern "C" __global__ void dense_linear_bf16(
     if (threadIdx.x == 0) output[row] = __float2half(sum);
 }
 
+// shortcut: correctness-first decoding repeats scale/zero reads and uses strided AWQ loads; tune after profiling.
 extern "C" __global__ void dense_linear_packed4(
     __half* output, const __half* input, const unsigned int* qweight, const __half* scales,
     const unsigned int* qzeros, const int* groupIndices, int outDim, int inDim, int groupSize, int awq)
