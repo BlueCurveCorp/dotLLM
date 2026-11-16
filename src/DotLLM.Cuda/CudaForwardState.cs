@@ -85,6 +85,36 @@ internal sealed class CudaForwardState : IDisposable
     public nint DequantScratch => _dequantScratch != 0 ? _dequantScratch
         : _dequantScratch = AllocDeviceAnyCapture(_maxProjectionElements * sizeof(ushort));
 
+    /// <summary>
+    /// Bytes the lazily allocated dequant scratch will still take on first use (#1833): the FP16 target, plus the F32 one when
+    /// this state carries F32 activations. A planner sizing a context-length allocation (the paged KV pool) must leave room for
+    /// it: on Windows a later allocation past dedicated VRAM is backed by shared system memory, and the FP16 dequant + cuBLAS
+    /// prefill then streams every projection's weights across PCIe.
+    /// </summary>
+    public long PendingLazyScratchBytes
+        => (_dequantScratch != 0 ? 0 : _maxProjectionElements * sizeof(ushort))
+           + (!_f32Activations || _dequantScratchF32 != 0 ? 0 : _maxProjectionElements * sizeof(float));
+
+    /// <summary>
+    /// Device bytes <see cref="EnsureCapacity"/> allocates per token of capacity (#1833), mirroring its buffer list, so a planner
+    /// can charge a prompt's activation growth against free VRAM. Excludes the fixed-size buffers and the power-of-two rounding.
+    /// </summary>
+    public long ActivationBytesPerToken
+    {
+        get
+        {
+            long q = (long)_numHeads * _headDim, kv = (long)_numKvHeads * _headDim;
+            long fp16 = 3L * _hiddenSize + 2 * q + 2 * kv + 3L * _intermediateSize
+                        + Math.Max(Math.Max(q, _intermediateSize), _hiddenSize)   // GemmOutputF16
+                        + MaxLoraRank;
+            long bytes = fp16 * sizeof(ushort) + 2 * sizeof(int);               // + token ids / positions
+            if (_f32Activations || _useFp32Residual) bytes += (long)_hiddenSize * sizeof(float);
+            if (_f32Activations) bytes += (2L * _hiddenSize + 2 * q + 2 * kv + 3L * _intermediateSize) * sizeof(float);
+            if (CudaKernels.MmqBatchedMinSeqLen != int.MaxValue) bytes += PreQ8_1ScratchBytes(PreQ8_1ScratchK);
+            return bytes;
+        }
+    }
+
     /// <summary>Whether <see cref="DequantScratch"/> or <see cref="DequantScratchF32"/> has been allocated (tests).</summary>
     internal bool DequantScratchAllocated => _dequantScratch != 0 || _dequantScratchF32 != 0;
 
