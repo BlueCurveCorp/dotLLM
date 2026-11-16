@@ -295,6 +295,14 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         public DotLLM.Engine.PromptLookupOptions? PromptLookupOptions
             => PromptLookup ? DotLLM.Engine.PromptLookupOptions.Create(LookupDraft, LookupNgram) : null;
 
+        /// <summary>Clover (clover_moe) decode mode (#1828).</summary>
+        [CommandOption("--clover-decode <MODE>")]
+        [Description("Clover (clover_moe) only: 'causal' (default, autoregressive) or 'block' (LowConfidence block diffusion: 32-token blocks " +
+                     "resolved by bidirectional previews with the block expert coreset, then committed causally; needs the official DiffuSpace GGUF " +
+                     "on the CPU or Vulkan host). Block mode supports greedy and temperature/top-k/top-p sampling; no logprobs, constraints, LoRA " +
+                     "or draft model, and the official penalties (stage 6) are not applied. Env fallback: DOTLLM_CLOVER_DECODE.")]
+        public string? CloverDecode { get; set; }
+
         /// <summary>Opt-out of MTP self-speculative decoding when the model carries (or is given) an MTP head.</summary>
         [CommandOption("--no-mtp")]
         [Description("Disable Multi-Token Prediction (MTP) self-speculative decoding (on by default when the model carries an MTP head; an adaptive gate falls back to plain decode when it loses).")]
@@ -763,6 +771,8 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
             prefillChunkSize: settings.PrefillChunkSize,
             recurrentPrefixCacheOptions: DotLLM.Server.ServerOptions.BuildPrefixSnapshotOptions(settings.PrefixSnapshots, settings.PrefixSnapshotHostBudget, settings.PrefixSnapshotDiskDirectory, settings.PrefixSnapshotDiskBudget, settings.PromptCacheStep, settings.PromptCacheStepKeep, promptCachePolicy),
             promptLookup: settings.PromptLookupOptions);
+        if (settings.CloverDecode is not null)
+            generator.CloverDecode = TextGenerator.ParseCloverDecodeOption(settings.CloverDecode);
 
         if (generator.RecurrentStepCheckpointBytes > 0)
             Console.WriteLine($"[dotllm] Prompt-cache steps: a {generator.RecurrentStepCheckpointBytes / 1048576.0:F1} MiB recurrent checkpoint every {settings.PromptCacheStep} prefill tokens, keeping {settings.PromptCacheStepKeep ?? 8}");

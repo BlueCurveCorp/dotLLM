@@ -35,7 +35,12 @@ public sealed partial class TextGenerator
     {
         _generationGate.Wait(cancellationToken);
         LastPrefixCacheTier = null; LastPrefixRestoreMilliseconds = 0;
-        try { return GenerateCore(prompt, options, onTokenGenerated, adapter, onTextGenerated, cancellationToken); }
+        try
+        {
+            return UseCloverBlockDiffusion()
+                ? GenerateCloverBlock(prompt, options, onTokenGenerated, adapter, onTextGenerated, cancellationToken)
+                : GenerateCore(prompt, options, onTokenGenerated, adapter, onTextGenerated, cancellationToken);
+        }
         finally { _generationGate.Release(); }
     }
 
@@ -47,7 +52,10 @@ public sealed partial class TextGenerator
         LastPrefixCacheTier = null; LastPrefixRestoreMilliseconds = 0;
         try
         {
-            await foreach (var token in GenerateStreamingTokensCoreAsync(prompt, options, cancellationToken, adapter).ConfigureAwait(false))
+            var stream = UseCloverBlockDiffusion()
+                ? GenerateCloverBlockStreamingAsync(prompt, options, cancellationToken, adapter)   // Clover block diffusion (#1828), opt-in
+                : GenerateStreamingTokensCoreAsync(prompt, options, cancellationToken, adapter);
+            await foreach (var token in stream.ConfigureAwait(false))
                 yield return token;
         }
         finally { _generationGate.Release(); }
