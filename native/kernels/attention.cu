@@ -529,25 +529,31 @@ extern "C" __global__ void __launch_bounds__(256) attention_f16_paged(
         running_sum += warp_scratch[0];
 
         // 2e. Accumulate weighted V — same block-table indirection as the K read above.
-        // #1839: walk the blocks incrementally instead of a runtime-divisor div/mod plus a
-        // dependent block-pointer load on EVERY one of the tile's serial iterations; the
-        // pointer is now reloaded once per block_size tokens. Same accumulation order, so the
-        // output stays bit-identical to attention_f16.
+        // #1839: walk the tile one block-run at a time. The old loop did a runtime-divisor
+        // div/mod plus a dependent block-pointer load on EVERY serial iteration, which made
+        // paged decode attention scale worse than attention_f16 with context. The inner loop
+        // over a run has a fixed base, the same shape as attention_f16's V loop. Same
+        // accumulation order (t ascending), so the output stays bit-identical to attention_f16.
         for (int d = threadIdx.x; d < head_dim; d += blockDim.x)
         {
             float v_acc = 0.0f;
-            int logical_block = t_start / block_size;
-            int offset_in_block = t_start - logical_block * block_size;
-            const half* v_block = v_block_ptrs[logical_block] + hkv * head_dim + d;
-            for (int t = 0; t < tile_len; t++)
+            int t = 0;
+            while (t < tile_len)
             {
-                if (score_tile[t] > 0.0f)
-                    v_acc += score_tile[t] * __half2float(v_block[(size_t)offset_in_block * kv_stride]);
-                if (++offset_in_block == block_size && t + 1 < tile_len)
+                int tkv = t_start + t;
+                int logical_block = tkv / block_size;
+                int offset_in_block = tkv - logical_block * block_size;
+                int run = block_size - offset_in_block;
+                if (run > tile_len - t) run = tile_len - t;
+                const half* v_run = v_block_ptrs[logical_block]
+                                    + (size_t)offset_in_block * kv_stride + hkv * head_dim + d;
+                for (int i = 0; i < run; i++)
                 {
-                    offset_in_block = 0;
-                    v_block = v_block_ptrs[++logical_block] + hkv * head_dim + d;
+                    float w = score_tile[t + i];
+                    if (w > 0.0f)
+                        v_acc += w * __half2float(v_run[(size_t)i * kv_stride]);
                 }
+                t += run;
             }
             out_accum[d] += v_acc;
         }
