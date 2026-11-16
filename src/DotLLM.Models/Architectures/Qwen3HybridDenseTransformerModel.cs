@@ -1113,6 +1113,8 @@ public sealed unsafe partial class Qwen3HybridDenseTransformerModel : IModel, Do
         dflashTaps?.EnsureTapRows(seqLen - tapFirst);
         for (int layer = 0; layer < _layers.Length; layer++)
         {
+            // (#1822) Intra-forward progress for a long CPU prefill; one thread-static null check when nobody listens.
+            DotLLM.Core.Diagnostics.ForwardProgress.LayersCompleted(layer, _layers.Length);
             var lw = _layers[layer];
             if (dflashTaps is not null)
                 CaptureDFlashTaps(dflashTaps, layer, hidden, tapFirst, seqLen, hiddenSize);

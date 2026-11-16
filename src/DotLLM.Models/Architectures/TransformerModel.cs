@@ -1392,6 +1392,8 @@ public sealed unsafe class TransformerModel : IModel, IEmbeddingModel, DotLLM.Co
         var residualModifier = ResidualModifier;
         for (int layer = firstLayer; layer < endLayer; layer++)
         {
+            // (#1822) Intra-forward progress for a long CPU prefill; one thread-static null check when nobody listens.
+            DotLLM.Core.Diagnostics.ForwardProgress.LayersCompleted(layer - firstLayer, endLayer - firstLayer);
             // PostLayer residual modifier for the PREVIOUS layer (several branches below `continue`, so
             // applying at the top of the next iteration covers all of them).
             if (residualModifier is not null && layer > firstLayer)

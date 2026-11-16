@@ -16,6 +16,7 @@ namespace DotLLM.Tests.Unit.Engine;
 /// split into multiple <c>Forward</c> calls of at most that many tokens with contiguous,
 /// correctly-offset positions; with the default (0), the prefill stays a single forward pass.
 /// </summary>
+[Collection("RequestTimingLogSink")]   // RequestTimingLog.Sink is process-global (#1822)
 public sealed class TextGeneratorPrefillChunkTests
 {
     private const int VocabSize = 16;

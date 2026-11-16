@@ -165,6 +165,10 @@ public sealed class PrefillPulse : IDisposable
     /// <param name="tokens">Tokens in the chunk that just completed.</param>
     public void Advance(int tokens) => Interlocked.Add(ref _completed, tokens);
 
+    /// <summary>Sets the completed count (absolute; #1822 per-layer progress inside a CPU forward). The caller keeps it monotonic.</summary>
+    /// <param name="completed">Tokens completed so far.</param>
+    public void Set(int completed) => Volatile.Write(ref _completed, completed);
+
     /// <summary>Writes one progress line now.</summary>
     internal void Pulse()
     {
