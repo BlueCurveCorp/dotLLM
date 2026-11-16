@@ -50,7 +50,7 @@ public sealed class DeviceFallbackTravelTests : IDisposable
         };
         state.ModelLoader = (path, options) =>
         {
-            bool fellBack = path.Contains("fallback", StringComparison.Ordinal);
+            bool fellBack = path.Contains("fallback", StringComparison.Ordinal) && !GpuRecovered;
             var loaded = new ServerState
             {
                 Options = options with { ResolvedDevice = fellBack ? "cpu" : "vulkan", DeviceFallbackWarning = null },
@@ -79,6 +79,32 @@ public sealed class DeviceFallbackTravelTests : IDisposable
         Assert.Null(state.DeviceFallbackWarning);
         Assert.Equal("vulkan", state.ActiveDevice);
         Assert.False(state.GetStatus().DeviceFallback);
+    }
+
+    /// <summary>When set, the next load of a <c>*fallback*</c> file succeeds on the GPU (the memory that blocked it was freed).</summary>
+    private bool GpuRecovered { get; set; }
+
+    /// <summary>
+    /// The idled-out reload passes the model's OWN previous options (fallback warning included) back to the loader: when the reload
+    /// succeeds on the GPU, the stale warning must not survive it.
+    /// </summary>
+    [Fact]
+    public async Task IdledOutReload_ThatNoLongerFallsBack_ClearsTheWarning()
+    {
+        var state = NewState();
+        Assert.Null(await state.EnsureActiveAsync(File("a-fallback.gguf"), null, CancellationToken.None));
+        string id = state.Options.ModelId;
+        Assert.NotNull(state.DeviceFallbackWarning);
+        await state.UnloadAsync(id, all: false, CancellationToken.None);
+
+        ServerOptions? seen = null;
+        var inner = state.ModelLoader;
+        state.ModelLoader = (p, o) => { seen = o; return inner(p, o); };
+        GpuRecovered = true;
+        Assert.Null(await state.EnsureActiveAsync(id, null, CancellationToken.None));
+        Assert.NotNull(seen!.DeviceFallbackWarning);   // the reload really was handed the stale warning ...
+        Assert.Null(state.DeviceFallbackWarning);      // ... and the successful GPU load cleared it
+        Assert.Equal("vulkan", state.ActiveDevice);
     }
 
     [Fact]
