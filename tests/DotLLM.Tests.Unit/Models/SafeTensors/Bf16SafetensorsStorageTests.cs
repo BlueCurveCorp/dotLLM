@@ -111,7 +111,7 @@ public sealed unsafe class Bf16SafetensorsStorageTests : IDisposable
     [InlineData(false, true, 2)]
     [InlineData(true, false, 2)]
     [InlineData(true, true, 1)]
-    public void PrefillAndCachedDecode_MatchExactlyWidenedReference(bool sharded, bool tied, int threads)
+    public void PrefillAndCachedDecode_MatchWidenedReferenceWithinTolerance(bool sharded, bool tied, int threads)
     {
         using var bf16File = WriteFixture("bf16", bf16: true, sharded, tied);
         using var referenceFile = WriteFixture("reference", bf16: false, sharded: false, tied);
