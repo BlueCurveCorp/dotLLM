@@ -254,9 +254,20 @@ internal sealed class VulkanQwen3MoeHybridWeights : IDisposable
         var outputNorm = UploadFloatArray(device, staging, outputNormWeight);
         totalBytes += (long)outputNormWeight.Length * sizeof(float);
 
-        var outputW = UploadProjectionMatrix(device, staging,
-            outputWeight, outputQt, outputOutputDim, outputInputDim,
-            forceF32: false, out var outputDeviceQt, out long outputBytes);
+        VulkanDevice.Buffer outputW;
+        QuantizationType outputDeviceQt;
+        long outputBytes;
+        if (LmHeadBf16ToQ8 && outputQt == QuantizationType.BF16 && (outputInputDim % QuantFormat.LegacyGroupSize) == 0)
+        {
+            outputW = UploadBf16AsQ8_0(device, staging, outputWeight, outputOutputDim, outputInputDim, out outputBytes);
+            outputDeviceQt = QuantizationType.Q8_0;
+        }
+        else
+        {
+            outputW = UploadProjectionMatrix(device, staging,
+                outputWeight, outputQt, outputOutputDim, outputInputDim,
+                forceF32: false, out outputDeviceQt, out outputBytes);
+        }
         totalBytes += outputBytes;
 
         return new VulkanQwen3MoeHybridWeights(layers, tokenEmbed, outputNorm,
@@ -515,6 +526,43 @@ internal sealed class VulkanQwen3MoeHybridWeights : IDisposable
             }
         }
         return Math.Max(max, 64);
+    }
+
+    /// <summary>
+    /// #1816 (user-approved, opt-in): a BF16 LM head is requantized to Q8_0 at load (<c>DOTLLM_VK_LMHEAD_BF16_TO_Q8=1</c>). The head is the
+    /// largest per-token read of a decode (Clover-35B-A3B: [248320 x 2048] BF16 = 1.02 GB, 5.0 ms/token at ~200 GB/s; Q8_0 is 0.54 GB).
+    /// A narrower re-encoding, not an expansion; the logits change by Q8_0's rounding. Off by default: BF16 stays exact.
+    /// </summary>
+    internal static bool LmHeadBf16ToQ8 { get; set; } = Environment.GetEnvironmentVariable("DOTLLM_VK_LMHEAD_BF16_TO_Q8") == "1";
+
+    /// <summary>
+    /// Requantizes a row-major BF16 matrix to Q8_0 (ggml <c>quantize_row_q8_0</c>) straight into the mapped staging chunks and uploads it.
+    /// Bounded: host memory is the existing staging buffer plus one <paramref name="inputDim"/>-float row per worker; the BF16 source is
+    /// read from the mmap. Logged with source / device bytes and wall time.
+    /// </summary>
+    internal static unsafe VulkanDevice.Buffer UploadBf16AsQ8_0(
+        VulkanDevice device, VulkanStagingBuffer staging, nint srcPtr, int outputDim, int inputDim, out long uploadedBytes)
+    {
+        long rowBytes = (long)(inputDim / QuantFormat.LegacyGroupSize) * QuantFormat.Q8_0BlockBytes;
+        uploadedBytes = rowBytes * outputDim;
+        var buf = device.AllocateDeviceLocal(uploadedBytes);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        staging.UploadRows(outputDim, rowBytes, buf, 0, (chunkPtr, firstRow, rowCount) =>
+        {
+            Parallel.For(0, rowCount, () => new float[inputDim], (r, _, row) =>
+            {
+                ushort* src = (ushort*)srcPtr + ((long)firstRow + r) * inputDim;   // long: vocab x dim can exceed 2^31
+                for (int i = 0; i < inputDim; i++) row[i] = BitConverter.Int32BitsToSingle(src[i] << 16);
+                Quantize.FromFloat32(row, inputDim, QuantizationType.Q8_0, new Span<byte>((byte*)chunkPtr + r * rowBytes, checked((int)rowBytes)));
+                return row;
+            }, _ => { });
+        });
+        long srcBytes = (long)outputDim * inputDim * 2;
+        Console.Error.WriteLine(
+            $"[dotLLM] Vulkan LM head BF16 -> Q8_0 at load (DOTLLM_VK_LMHEAD_BF16_TO_Q8=1, #1816): [{outputDim} x {inputDim}] " +
+            $"{srcBytes / 1048576.0:F0} MiB -> {uploadedBytes / 1048576.0:F0} MiB in {sw.Elapsed.TotalMilliseconds:F0} ms " +
+            $"(staging chunks of {staging.Capacity / 1048576.0:F0} MiB, one {inputDim}-float row per worker; no other host copy)");
+        return buf;
     }
 
     /// <summary>
