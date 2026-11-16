@@ -169,6 +169,21 @@ public sealed class ModelAliasActivationTests : IDisposable
         Assert.Equal("tinyprof", state.Options.ModelId);
     }
 
+    /// <summary>
+    /// A profile created later under the very name the model was served as shadows it (profiles shadow a model sharing the name), so
+    /// that name now means the profile: it must not keep matching the plain model through the served-as alias.
+    /// </summary>
+    [Fact]
+    public async Task ProfileShadowingTheServedAsName_IsNoLongerAnAlias()
+    {
+        var state = NewState();
+        Assert.Null(await state.EnsureActiveAsync(Stem, null, CancellationToken.None));
+        Assert.True(state.IsActiveModel(Stem));
+        ModelProfileStore.Save(Stem, new ModelProfile { From = _path });
+        Assert.False(state.IsActiveModel(Stem));
+        Assert.True(state.IsActiveModel(state.Options.ModelId));   // the id itself still names it
+    }
+
     /// <summary>The residency lookup matches aliases too: a stashed model requested by its short id is reactivated, not reloaded.</summary>
     [Fact]
     public async Task StashedModel_RequestedByShortId_IsReactivatedWithoutReload()

@@ -36,8 +36,9 @@ internal static class ModelAliases
         if (!string.IsNullOrEmpty(servedAs) && servedAs != "none" && string.Equals(requested, servedAs, StringComparison.OrdinalIgnoreCase))
             return true;
         if (string.IsNullOrEmpty(loadedPath)) return false;
-        if (SamePath(requested, loadedPath)) return true;
 
+        // Everything else - a file path, a repo id, a bare stem, an issued id - goes through the resolver: a match must resolve to this
+        // file AND produce this id (so a profile or ollama name over the same file is not this model).
         string? path;
         try { path = resolve(requested); }
         catch (Exception) { return false; }   // e.g. an ambiguous bare name: not a match; activation reports the error as before
@@ -45,12 +46,10 @@ internal static class ModelAliases
             && string.Equals(ServerStartup.ModelIdFor(requested, path), modelId, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>Whether two strings are paths to the same file (full-path compare; case-insensitive on Windows).</summary>
+    /// <summary>Whether two paths name the same file (full-path compare; case-insensitive on Windows).</summary>
     private static bool SamePath(string a, string b)
     {
         if (string.Equals(a, b, PathComparison)) return true;
-        bool looksLikePath = a.Contains('/') || a.Contains('\\') || a.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase);
-        if (!looksLikePath) return false;
         try { return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), PathComparison); }
         catch (Exception) { return false; }   // not a valid path
     }
