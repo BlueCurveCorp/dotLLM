@@ -849,7 +849,9 @@ public sealed class ServerState : IDisposable
             if (!Catalog.IsEnabled(targetKey))
                 return $"Model is disabled: {targetKey}";
 
-            var snapshot = Residency.TryTake(targetKey);
+            // (#1821) A stashed model is found by any of its aliases too, not only by its id.
+            var snapshot = Residency.TryTake(targetKey)
+                ?? (Residency.FindKey(s => NamesStashed(targetKey, s)) is { } stashedKey ? Residency.TryTake(stashedKey) : null);
             if (snapshot is not null)
             {
                 await StopSchedulerAsync().ConfigureAwait(false);
@@ -863,8 +865,9 @@ public sealed class ServerState : IDisposable
             ServerOptions loadOptions;
             long incomingBytes;
             // A profile is re-resolved even when it was the last model: its base may have changed since (#1021 review).
-            if (string.Equals(targetKey, Options.ModelId, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(LoadedModelPath)
-                && ModelProfileStore.Resolve(targetKey) is null)
+            // (#1821) Matched by alias, so an idled-out model requested by its short id reloads with the options it was served with.
+            if (!string.IsNullOrEmpty(LoadedModelPath) && ModelProfileStore.Resolve(targetKey) is null
+                && (string.Equals(targetKey, Options.ModelId, StringComparison.OrdinalIgnoreCase) || NamesActive(targetKey)))
             {
                 // Same model as before, just idled out - reload from the same path/options.
                 reloadPath = LoadedModelPath;
@@ -1059,10 +1062,18 @@ public sealed class ServerState : IDisposable
             unloaded.Add(key!);
             return unloaded;
         }
+        // (#1821) An alias of a stashed model unloads it too - unless it names the active one, handled below.
+        else if (!string.IsNullOrWhiteSpace(key) && !NamesActive(key)
+                 && Residency.FindKey(s => NamesStashed(key!, s)) is { } aliasKey && Residency.TryTake(aliasKey) is { } aliased)
+        {
+            aliased.Dispose();
+            unloaded.Add(aliasKey);
+            return unloaded;
+        }
 
         bool targetsActive = all
             || string.IsNullOrWhiteSpace(key)
-            || string.Equals(Options.ModelId, key, StringComparison.OrdinalIgnoreCase);
+            || NamesActive(key);   // (#1821) by any alias, not only the id
 
         if (targetsActive && Model is not null)
         {
@@ -1099,7 +1110,43 @@ public sealed class ServerState : IDisposable
 
     private bool MatchesActiveAndReady(string? requestedModel) =>
         IsReady && Model is not null &&
-        (string.IsNullOrWhiteSpace(requestedModel) || string.Equals(Options.ModelId, requestedModel, StringComparison.OrdinalIgnoreCase));
+        (string.IsNullOrWhiteSpace(requestedModel) || NamesActive(requestedModel));
+
+    /// <summary>
+    /// True when a model is loaded and ready and <paramref name="requestedModel"/> names it by any of its aliases (#1821): its id, the
+    /// short id / argument it was served or loaded as, its file path, or a reference the server's resolver maps to the same file and id.
+    /// </summary>
+    /// <param name="requestedModel">The requested model string.</param>
+    /// <returns>Whether it names the active, ready model. Null/blank returns false.</returns>
+    public bool IsActiveModel(string? requestedModel) => IsReady && Model is not null && NamesActive(requestedModel);
+
+    /// <summary>Whether <paramref name="requestedModel"/> names the active (or idled-out, still-remembered) model, ready or not (#1821).</summary>
+    private bool NamesActive(string? requestedModel) =>
+        ModelAliases.Names(requestedModel, Options.ModelId, Options.Model, LoadedModelPath, ResolveForAlias);
+
+    /// <summary>Whether <paramref name="requestedModel"/> names the stashed model <paramref name="snapshot"/> (#1821).</summary>
+    private bool NamesStashed(string requestedModel, ResidentModelSnapshot snapshot) =>
+        ModelAliases.Names(requestedModel, snapshot.Key, snapshot.Options.Model, snapshot.LoadedModelPath, ResolveForAlias);
+
+    /// <summary>How long an alias resolution is reused: one activation re-checks the match several times, so it must not re-scan the stores each time.</summary>
+    private static readonly TimeSpan AliasResolutionTtl = TimeSpan.FromSeconds(5);
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string? Path, long Ticks)> _aliasResolutions = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The path the server would load for <paramref name="reference"/> (an issued id first, then <see cref="ServerStartup.ResolveModelPath"/> -
+    /// the resolver <c>serve</c> and activation use), cached for <see cref="AliasResolutionTtl"/>. Throws when the name is ambiguous.
+    /// </summary>
+    private string? ResolveForAlias(string reference)
+    {
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_aliasResolutions.TryGetValue(reference, out var hit) && System.Diagnostics.Stopwatch.GetElapsedTime(hit.Ticks, now) < AliasResolutionTtl)
+            return hit.Path;
+        string? path = PathForIssuedId(reference) ?? ServerStartup.ResolveModelPath(reference, quant: null);
+        if (_aliasResolutions.Count > 256) _aliasResolutions.Clear();
+        _aliasResolutions[reference] = (path, now);
+        return path;
+    }
 
     private void Touch(double? keepAliveOverride)
     {

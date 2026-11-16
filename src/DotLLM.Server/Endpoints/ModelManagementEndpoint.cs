@@ -249,9 +249,7 @@ public static class ModelManagementEndpoint
         });
     }
 
-    private static bool IsActive(ServerState state, string key) =>
-        state.IsReady && state.Model is not null
-        && string.Equals(state.Options.ModelId, key, StringComparison.OrdinalIgnoreCase);
+    private static bool IsActive(ServerState state, string key) => state.IsActiveModel(key);   // (#1821) by any alias
 
     // ────────────────────────────── pull (#454) ──────────────────────────────
 
