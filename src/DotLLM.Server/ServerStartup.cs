@@ -618,11 +618,13 @@ public static class ServerStartup
                 // part of the scheduler's admission, so CUDA requests still serve one at a time through
                 // the per-request TextGenerator path. Only the per-request KV-cache backing changes
                 // (block-based instead of one flat buffer).
-                cudaPagedFactory = new DotLLM.Cuda.CudaPagedKvCacheFactory(
-                    DotLLM.Core.Attention.KvGeometry.FromConfig(config));
+                // #1833: sized to free VRAM, not a fixed 65536 tokens (10 GiB for TwIL-8B on a 12 GB card, spilled by WDDM).
+                cudaPagedFactory = cudaModel.CreateFittedPagedKvCacheFactory(
+                    Math.Min(config.MaxSequenceLength, DotLLM.Cuda.CudaPagedKvCacheFactory.DefaultMaxTotalTokens), out string poolSummary);
                 var factory = cudaPagedFactory;
                 kvFactory = (cfg, size) => cudaModel.CreatePagedKvCache(factory.Pool, size);
                 Console.WriteLine("[dotllm] Using GPU paged KV-cache (block-based allocation, single-request dispatch)");
+                Console.WriteLine($"[dotllm] {poolSummary}");
             }
             else
             {

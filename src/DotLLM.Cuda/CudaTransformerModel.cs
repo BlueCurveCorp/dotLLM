@@ -4590,6 +4590,42 @@ public sealed unsafe class CudaTransformerModel : IModel
     }
 
     /// <summary>
+    /// Issue #1833: creates the shared paged-KV block pool sized to fit this device. The pool takes the smaller of
+    /// <paramref name="requestedTokens"/> and the tokens that fit in free VRAM after this model's not-yet-allocated forward
+    /// scratch, the per-request gather scratch and prompt activations, keeping
+    /// <see cref="Core.Configuration.DeviceMemoryBudget.ReserveEnvVar"/> free. A pool past dedicated VRAM is not refused by
+    /// WDDM: it and every later allocation land in shared system memory, and prefill then crawls over PCIe.
+    /// </summary>
+    /// <param name="requestedTokens">Upper bound on pool capacity, normally the served context.</param>
+    /// <param name="summary">One log line describing the chosen size and why.</param>
+    /// <param name="blockSize">Tokens per block.</param>
+    /// <returns>The factory owning the pool.</returns>
+    public CudaPagedKvCacheFactory CreateFittedPagedKvCacheFactory(int requestedTokens, out string summary, int blockSize = 16)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(requestedTokens);
+        _context.MakeCurrent();
+        var geom = Core.Attention.KvGeometry.FromConfig(Config);
+        CudaDriverApi.cuMemGetInfo_v2(out nuint free, out _).ThrowOnError();
+        long reserve = Core.Configuration.DeviceMemoryBudget.ResolveReserveBytes(
+            Environment.GetEnvironmentVariable(Core.Configuration.DeviceMemoryBudget.ReserveEnvVar));
+        long fixedBytes = _state.PendingLazyScratchBytes;
+        long poolPerToken = CudaPagedKvCacheFactory.PoolBytesPerToken(geom);
+        // Each live cache owns a gather scratch up to the pool's length: the request's own plus the live-KV prefix cache's
+        // retained entries (PrefixCache keeps up to 4).
+        long perToken = poolPerToken
+                        + CudaPagedKvCacheFactory.GatherScratchBytesPerToken(geom) * CudaPagedKvCacheFactory.LiveCachesCharged
+                        + _state.ActivationBytesPerToken;
+        int fit = CudaPagedKvCacheFactory.FitPoolTokens((long)free, reserve, fixedBytes, perToken, requestedTokens);
+        int tokens = fit > 0 ? fit : Math.Min(requestedTokens, Core.Configuration.DeviceMemoryBudget.ContextGranularity);
+        summary = $"GPU paged KV pool: {tokens} tokens ({(tokens * poolPerToken) >> 20} MiB) of {requestedTokens} requested; "
+                  + $"{(long)free >> 20} MiB free, {reserve >> 20} MiB reserve, {fixedBytes >> 20} MiB pending scratch, "
+                  + $"{perToken >> 10} KiB per token";
+        if (fit == 0)
+            summary += ". WARNING: even this does not fit in free VRAM; expect the driver to spill into system memory";
+        return new CudaPagedKvCacheFactory(geom, blockSize, tokens, _context);
+    }
+
+    /// <summary>
     /// Creates a paged KV-cache (issue #252) for a single sequence, backed by
     /// <paramref name="pool"/>. The pool is typically shared across every sequence a
     /// server/scheduler admits, so caller owns disposing it once (via <see cref="CudaKvBlockPool"/>
@@ -4602,7 +4638,10 @@ public sealed unsafe class CudaTransformerModel : IModel
     public CudaPagedKvCache CreatePagedKvCache(CudaKvBlockPool pool, int maxSeqLen)
     {
         _context.MakeCurrent();
-        return new CudaPagedKvCache(pool, maxSeqLen);
+        // #1833: a sequence cannot outgrow the pool, so its gather scratch (sized by maxSeqLen, allocated per request on top of
+        // the pool) is bounded to the capacity the pool fit charged for. A longer request fails at the first position past the
+        // pool with the cache's own length error instead of exhausting the pool mid-prefill.
+        return new CudaPagedKvCache(pool, CudaPagedKvCacheFactory.ClampToPool(maxSeqLen, pool));
     }
 
     /// <summary>

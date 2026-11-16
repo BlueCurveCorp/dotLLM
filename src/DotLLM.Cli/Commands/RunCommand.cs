@@ -799,8 +799,10 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 {
                     // Issue #252: block-scattered device storage + gather-into-scratch attention
                     // dispatch. Mirrors the CPU `--paged` branch below.
-                    cudaPagedFactory = new DotLLM.Cuda.CudaPagedKvCacheFactory(
-                        DotLLM.Core.Attention.KvGeometry.FromConfig(config));
+                    // #1833: sized to free VRAM (a fixed 65536-token pool spills into shared memory on 12 GB cards).
+                    cudaPagedFactory = cudaModel.CreateFittedPagedKvCacheFactory(
+                        Math.Min(config.MaxSequenceLength, DotLLM.Cuda.CudaPagedKvCacheFactory.DefaultMaxTotalTokens), out string poolSummary);
+                    Console.Error.WriteLine($"[dotllm] {poolSummary}");
                     var factory = cudaPagedFactory;
                     kvFactory = (cfg, size) => cudaModel.CreatePagedKvCache(factory.Pool, size);
                 }

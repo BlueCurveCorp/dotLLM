@@ -665,8 +665,10 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
             {
                 // Issue #252: block-scattered device storage + gather-into-scratch attention
                 // dispatch. Mirrors the CPU `--paged` branch below.
-                cudaPagedFactory = new DotLLM.Cuda.CudaPagedKvCacheFactory(
-                    DotLLM.Core.Attention.KvGeometry.FromConfig(config!));
+                // #1833: sized to free VRAM (a fixed 65536-token pool spills into shared memory on 12 GB cards).
+                cudaPagedFactory = cudaModel.CreateFittedPagedKvCacheFactory(
+                    Math.Min(config!.MaxSequenceLength, DotLLM.Cuda.CudaPagedKvCacheFactory.DefaultMaxTotalTokens), out string poolSummary);
+                AnsiConsole.MarkupLine($"[grey]{Markup.Escape(poolSummary)}[/]");
                 var factory = cudaPagedFactory;
                 kvFactory = (cfg, size) => cudaModel.CreatePagedKvCache(factory.Pool, size);
             }
