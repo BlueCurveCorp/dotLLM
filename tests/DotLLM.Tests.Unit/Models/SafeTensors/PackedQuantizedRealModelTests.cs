@@ -20,12 +20,15 @@ public sealed unsafe class PackedQuantizedRealModelTests(ITestOutputHelper outpu
     public void TinyLlama_PrefillAndDecodeMatchPinnedProducerAndHuggingFace(string format, string expectedHash)
     {
         var fixture = TestFixtureResolver.ResolveDirectory([$"DOTLLM_TEST_TINYLLAMA_{format}"], "TheBloke",
-            $"TinyLlama-1.1B-Chat-v1.0-{format}", ["model.safetensors", "config.json", "packed-reference.json"], null);
-        Skip.If(!fixture.Found, fixture.SkipMessage("TinyLlama packed checkpoint and generate_packed_hf_reference.py output"));
+            $"TinyLlama-1.1B-Chat-v1.0-{format}", ["model.safetensors", "config.json"], null);
+        Skip.If(!fixture.Found, fixture.SkipMessage("TinyLlama packed checkpoint"));
+        string oraclePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".dotllm", "test-cache", "packed-oracles", expectedHash + ".json");
+        Skip.IfNot(File.Exists(oraclePath), $"Generate {oraclePath} with tests/scripts/generate_packed_hf_reference.py {fixture.Path}");
         string path = Path.Combine(fixture.Path!, "model.safetensors");
         using (var stream = File.OpenRead(path))
             Assert.Equal(expectedHash, Convert.ToHexStringLower(SHA256.HashData(stream)));
-        using var reference = JsonDocument.Parse(File.ReadAllText(Path.Combine(fixture.Path!, "packed-reference.json")));
+        using var reference = JsonDocument.Parse(File.ReadAllText(oraclePath));
         Assert.Equal(expectedHash, reference.RootElement.GetProperty("model_sha256").GetString());
         Assert.Equal("4.51.3", reference.RootElement.GetProperty("transformers").GetString());
         Assert.Equal(string.Equals(format, "AWQ", StringComparison.Ordinal) ? "65eab3eabe3f55e300ffbab5feac59c49322d985f42dcda4e2288859fb9a4abe"
@@ -34,7 +37,7 @@ public sealed unsafe class PackedQuantizedRealModelTests(ITestOutputHelper outpu
         var watch = Stopwatch.StartNew();
         var (model, source, config) = ModelLoader.LoadFromSafetensors(path, new ThreadingConfig(4, EnableCallerPinning: false));
         using (source) using (model)
-        using (var cache = new SimpleKvCache(config.NumLayers, config.NumKvHeads, config.HeadDim, 16))
+        using (var cache = new SimpleKvCache(config.NumLayers, config.NumKvHeads, config.HeadDim, 64))
         {
             var packed = Assert.IsType<PackedQuantizedSafetensorsSource>(source);
             Assert.Equal(154, packed.ProjectionCount);
@@ -74,6 +77,20 @@ public sealed unsafe class PackedQuantizedRealModelTests(ITestOutputHelper outpu
                 + $"physical_tensor_bytes={source.Tensors.Sum(t => t.ByteCount)}, packed_bytes={packed.PackedBytes}, "
                 + $"logical_parameters={packed.LogicalParameterCount}, descriptor_bytes={packed.ProjectionCount * 64}, "
                 + $"kernel_accumulator=Vector256<float>, kernel_weight_scratch_bytes=0, inference_scratch_bytes={model.ComputeMemoryBytes}");
+            // Report warmed single-token decode separately from load, prefill and oracle comparisons.
+            const int decodeTokens = 16;
+            int next = 2100;
+            watch.Restart();
+            for (int i = 0; i < decodeTokens; i++)
+            {
+                using var logits = model.Forward([next], [position++], -1, cache);
+                var values = new ReadOnlySpan<float>((void*)logits.DataPointer, config.VocabSize);
+                next = ArgMax(values);
+                Assert.True(float.IsFinite(values[next]));
+            }
+            watch.Stop();
+            output.WriteLine(FormattableString.Invariant(
+                $"{format}: decode_threads=4, decode_tokens={decodeTokens}, decode_seconds={watch.Elapsed.TotalSeconds:F3}, decode_tokens_per_second={decodeTokens / watch.Elapsed.TotalSeconds:F3}"));
         }
     }
 

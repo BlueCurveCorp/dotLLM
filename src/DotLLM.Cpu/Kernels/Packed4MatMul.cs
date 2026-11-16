@@ -53,6 +53,7 @@ public static unsafe class Packed4MatMul
             int token = task / blocks, block = task % blocks, output = block * 8;
             var sums = Vector256<float>.Zero;
             float* input = context.Input + (long)token * k;
+            // shortcut: correctness-first decoding repeats group scale/zero reads; hoist after profiling.
             for (int column = 0; column < k; column++)
             {
                 int group = awq ? column / w->GroupSize : w->GroupIndices[column];

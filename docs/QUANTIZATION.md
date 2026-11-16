@@ -62,12 +62,20 @@ group sizes, nonidentity `g_idx`, malformed data, shard boundaries, tied heads,
 descriptor disposal, prefill and cached decode. Optional
 `PackedQuantizedRealModelTests` resolves TheBloke TinyLlama-1.1B-Chat-v1.0 AWQ/GPTQ
 from the shared model store/HF cache or `DOTLLM_TEST_TINYLLAMA_AWQ` /
-`DOTLLM_TEST_TINYLLAMA_GPTQ`. Generate its adjacent `packed-reference.json` using
+`DOTLLM_TEST_TINYLLAMA_GPTQ`, independently of generated oracle availability. Generate
+`~/.dotllm/test-cache/packed-oracles/<model-sha256>.json` using
 `tests/scripts/generate_packed_hf_reference.py MODEL_DIRECTORY` with CPU PyTorch,
-Transformers 4.51.3 and SafeTensors installed. The script runs the pinned
+Transformers 4.51.3 and SafeTensors installed. The script verifies the expected
+producer-source SHA256 before executing the pinned
 producer's unpacking code with F32 scratch scales, then the Hugging Face eager
 Llama implementation; this isolates format correctness from GPU F16 arithmetic
 rounding. Model data and generated logits remain outside the repository.
+
+On 2026-11-16, Windows 11 / Ryzen 9 7950X / .NET 10.0.15, the pinned TinyLlama
+tests measured **1.175 tokens/s AWQ** and **1.327 tokens/s GPTQ**, using four threads,
+16 warmed single-token decodes after a six-token history, excluding loading,
+prefill and oracle comparisons. These are indicative correctness-kernel timings,
+not throughput targets. The test prints the timing so other machines can repeat it.
 
 ## Block Layouts
 
