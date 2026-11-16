@@ -139,6 +139,21 @@ public sealed class ModelResidencyManager : IDisposable
         lock (_lock) { return _resident.Remove(key, out var s) ? s : null; }
     }
 
+    /// <summary>
+    /// The key of the first stashed model matching <paramref name="where"/>, or null (#1821: alias lookup). The predicate runs outside the
+    /// lock, on a copy, since it may touch the file system.
+    /// </summary>
+    /// <param name="where">The match.</param>
+    /// <returns>The key, or null.</returns>
+    public string? FindKey(Func<ResidentModelSnapshot, bool> where)
+    {
+        ResidentModelSnapshot[] all;
+        lock (_lock) { all = _resident.Values.ToArray(); }
+        foreach (var s in all)
+            if (where(s)) return s.Key;
+        return null;
+    }
+
     /// <summary>Whether a model with the given key is currently stashed (not counting the active one).</summary>
     public bool Contains(string key)
     {

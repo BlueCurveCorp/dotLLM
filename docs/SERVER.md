@@ -290,6 +290,14 @@ Lists every **resident** model — the active one plus any stashed-but-loaded mo
 ```
 `expires_in_seconds` is omitted when the model's keep-alive is negative (pinned, never auto-unloads).
 
+**A request's `model` matches a loaded model by any alias (#1821).** The listed `id` (`owner/repo/file.gguf`), the argument the model was
+served or loaded as (the short id or repo id given to `dotllm serve`, including its `--quant`), its file path, or any reference the server's
+resolver maps to the same file *and* the same id all hit the active model, or reactivate a stashed one, with no reload. This holds on every
+surface: `/v1/chat/completions`, `/v1/completions`, `/v1/messages`, `/v1/embeddings`, `/api/*`, and also `POST /v1/models/unload` and
+`still_loaded`. Before #1821 only the exact id matched, so a client sending the short id evicted and reloaded the model on every request,
+which discarded the prompt cache and re-ran `--device auto`. A profile is its own model even over the same file: `model: "myprof"`
+matches only a model loaded as that profile. An unknown or ambiguous name behaves as before.
+
 **Idle means no request in flight (#1606).** The keep-alive clock counts from the moment the *last* request finished, and the idle sweep never unloads the active model while any request is generating, on any path (gated direct-generator requests, and continuous-batch scheduler requests, streaming or not, which hold no gate). A single generation longer than `--keep-alive` is therefore safe; the model unloads `--keep-alive` seconds after it ends.
 
 Each loaded model also carries llama.cpp's `meta` object (#1289) under llama.cpp's field names, plus `n_ctx` (the
