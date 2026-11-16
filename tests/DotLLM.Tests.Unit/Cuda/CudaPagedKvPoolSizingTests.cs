@@ -104,6 +104,8 @@ public sealed class CudaPagedKvPoolSizingTests
     public void FitPoolTokens_SubGranuleRequest_GrantedWhenItFits_ZeroWhenNot()
     {
         Assert.Equal(512, CudaPagedKvCacheFactory.FitPoolTokens(1 * GiB, 0, 0, TwilPerToken, 512));
+        // Less than one 1024-token granule is free, but the small request fits: granted, not rounded down to 0.
+        Assert.Equal(512, CudaPagedKvCacheFactory.FitPoolTokens(600 * TwilPerToken, 0, 0, TwilPerToken, 512));
         Assert.Equal(0, CudaPagedKvCacheFactory.FitPoolTokens(511 * TwilPerToken, 0, 0, TwilPerToken, 512));
     }
 
