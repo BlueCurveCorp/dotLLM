@@ -47,6 +47,7 @@ public sealed partial class TextGenerator
     private const string CloverDecodeEnv = "DOTLLM_CLOVER_DECODE";
     private CloverDecodeMode? _cloverDecodeMode;
     private bool _cloverUnsupportedWarned;
+    private static readonly bool CloverTrace = Environment.GetEnvironmentVariable("DOTLLM_CLOVER_TRACE") == "1";
 
     /// <summary>
     /// Decoding mode for Clover models (#1828). Defaults to <see cref="CloverDecodeMode.Causal"/>; <c>DOTLLM_CLOVER_DECODE=block</c>
@@ -150,6 +151,9 @@ public sealed partial class TextGenerator
                 steps += resolved.Steps.Count;
                 previewTicks += resolved.PreviewTicks;
                 selectTicks += resolved.SelectTicks;
+                if (CloverTrace)
+                    Console.Error.WriteLine($"[clover] block {blocks} @{committed}: " + string.Join(" ", resolved.Steps.Select(s =>
+                        "[" + string.Join(",", s.Filled.Select((pos, n) => $"{pos}:{s.Tokens[n]}")) + (s.Fallback ? "]*" : "]"))));
 
                 // HF: stop only after the whole block resolved; tokens past the stop are dropped.
                 for (int i = 0; i < remaining; i++)

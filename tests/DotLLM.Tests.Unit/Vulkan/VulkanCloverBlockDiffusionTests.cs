@@ -90,14 +90,60 @@ public sealed class VulkanCloverBlockDiffusionTests(ITestOutputHelper output)
                 output.WriteLine($"[vk clover coreset preview vs HF] {c.Name}: maxAbs={cmp.MaxAbs:E2} meanKL={cmp.MeanKl:E2} maxKL={cmp.MaxKl:E2} "
                                  + $"top1={cmp.Top1:P0} (HF coreset on vs off: {c.CoresetOffDelta:F2})");
                 // The Vulkan host's causal floor on this fixture family is ~1e-2 max-abs at the stage-3 logit scale (#1819), here times
-                // the LM-head sharpening (8x logits, so ~64x KL): measured maxAbs 3.6e-2..1.7e-1, maxKL 8.8e-6..1.6e-3. The coreset on/off
+                // the LM-head sharpening (8x logits, so ~64x KL): measured maxAbs 2.5e-2..1.7e-1, maxKL 8.8e-6..1.6e-3
+                // (the same as Vulkan vs CPU, see CoresetPreview_VulkanVsCpu_AtTheHostFloor). The coreset on/off
                 // difference is 28-48 max-abs, so a wrong keep set cannot hide under these bounds.
-                Assert.True(cmp.MaxAbs < 2e-2f * oracle.LmScale, $"{c.Name}: maxAbs {cmp.MaxAbs:E3}");
+                Assert.True(cmp.MaxAbs < 4e-2f * oracle.LmScale, $"{c.Name}: maxAbs {cmp.MaxAbs:E3}");
                 Assert.True(cmp.MaxKl < 5e-3, $"{c.Name}: maxKL {cmp.MaxKl:E3}");
                 Assert.Equal(1.0, cmp.Top1);
             }
             return 0;
         });
+    }
+
+    /// <summary>
+    /// Separates the coreset from the Vulkan host's numerical floor: Vulkan vs CPU with the coreset on and off, both at the same floor
+    /// (same weights, same blocks). A wrong Vulkan keep set would move logits by the on/off difference (28-48).
+    /// </summary>
+    [SkippableFact]
+    public void CoresetPreview_VulkanVsCpu_AtTheHostFloor()
+    {
+        VulkanMatMulF32KernelTests.SkipIfUnavailable(out string spvDir);
+        string? dir = CloverBlockDiffusionOracleTests.FixtureDir();
+        Skip.If(dir is null, "clover generate oracle fixture not present (run scripts/clover_preview_oracle.py --mode generate)");
+        var oracle = CloverBlockDiffusionOracleTests.Read(dir!);
+        string path = Path.Combine(dir!, "clover-generate-tiny.gguf");
+        foreach (bool coreset in new[] { true, false })
+        {
+            using var gguf = GgufFile.Open(path);
+            var baseConfig = GgufModelConfigExtractor.Extract(gguf.Metadata);
+            var config = baseConfig with { Clover = baseConfig.Clover! with { MoeBlockCoresetEnabled = coreset } };
+            using var cpu = (DotLLM.Models.Architectures.Qwen3MoeHybridTransformerModel)DotLLM.Models.ModelLoader.CreateCpuModelFromGguf(gguf, config);
+            using var device = VulkanDevice.Create();
+            using var vk = VulkanQwen3MoeHybridTransformerModel.BuildFromGguf(device, gguf, config, spvDir);
+            float worst = 0f;
+            foreach (var c in oracle.Previews)
+            {
+                using var kvC = new DotLLM.Engine.KvCache.SimpleKvCache(cpu.AttentionLayerCount, config.NumKvHeads, config.HeadDim, config.MaxSequenceLength);
+                using var gdnC = (DotLLM.Models.Architectures.GdnStateCache)cpu.CreateSequenceState()!;
+                cpu.Forward(c.Prefix, Enumerable.Range(0, c.Prefix.Length).ToArray(), -1, kvC, gdnC).Dispose();
+                using var tC = cpu.ForwardBlockPreview(c.Block, c.Prefix.Length, kvC, gdnC, -1);
+                using var kvV = vk.CreateKvCache(config.MaxSequenceLength);
+                using var gdnV = vk.CreateGdnStateCache();
+                vk.Forward(c.Prefix, Enumerable.Range(0, c.Prefix.Length).ToArray(), -1, kvV, gdnV, null).Dispose();
+                using var tV = vk.ForwardBlockPreview(c.Block, c.Prefix.Length, kvV, gdnV, -1);
+                int n = c.Block.Length * oracle.Vocab;
+                var cmp = CloverPreviewOracleTests.Compare(CloverPreviewOracleTests.ToArray(tV, n), CloverPreviewOracleTests.ToArray(tC, n),
+                                                           oracle.Vocab, oracle.MaskTokenId);
+                output.WriteLine($"[vk vs cpu, coreset {(coreset ? "on " : "off")}] {c.Name}: maxAbs={cmp.MaxAbs:E2} maxKL={cmp.MaxKl:E2} top1={cmp.Top1:P0}");
+                worst = MathF.Max(worst, cmp.MaxAbs);
+                Assert.Equal(1.0, cmp.Top1);
+            }
+            // Both arms sit at the host floor (measured worst: on 1.7e-1, off 6.2e-2; the on-arm excess is one row of prefix3_T32_half,
+            // where five experts at 5-12% mass make per-row top-2 near-ties, and the keep-set margins there are >= 3.8e-3, far above
+            // the drift). A keep-set fault moves logits by the on/off difference, 28-48.
+            Assert.True(worst < 0.04f * oracle.LmScale, $"coreset {(coreset ? "on" : "off")}: Vulkan vs CPU maxAbs {worst:E2}");
+        }
     }
 
     /// <summary>HF <c>generate</c> on Vulkan: the same committed ids and per-step fill order.</summary>
