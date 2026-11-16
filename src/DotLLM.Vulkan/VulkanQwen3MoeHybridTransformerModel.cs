@@ -1385,24 +1385,48 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
 
     // ── MoE FFN ──────────────────────────────────────────────────────────────
 
-    private static readonly bool FuseDecodeEnabled =
+    /// <summary>Single-token decode as one command buffer (<c>DOTLLM_VK_FUSE_FORWARD=0</c> at startup turns it off; settable for in-process A/B).</summary>
+    internal static bool FuseDecodeEnabled { get; set; } =
         !string.Equals(Environment.GetEnvironmentVariable("DOTLLM_VK_FUSE_FORWARD"), "0", StringComparison.Ordinal);
 
-    // Latched once every layer's resident bundle exists and takes RecordMoeDecodeFast (BuildFromGguf uploads them at load; prebuilt fixtures
-    // fill them lazily in the first forwards, which take the per-layer-submission path); false/unset re-checks until all bundles are present.
-    private bool _fuseDecodeOk;
+    /// <summary>
+    /// #1814, on by default (DOTLLM_VK_FUSE_MIXED_MOE=0 restores the per-layer path): single-token decode stays one command buffer when some
+    /// layers' resident banks miss <see cref="RecordMoeDecodeFast"/> (Clover's Q8_0 layer 0), recording the general device-resident MoE layer
+    /// for them in the same buffer instead of dropping the WHOLE token onto the per-layer path (two fence round trips per layer). Default for
+    /// every Qwen3MoeHybrid file (user decision, #1817); the logits are bit-identical to the per-layer path.
+    /// </summary>
+    internal static bool FuseMixedMoeDecode { get; set; } = Environment.GetEnvironmentVariable("DOTLLM_VK_FUSE_MIXED_MOE") != "0";
+
+    // Latched once every layer's resident bundle exists (BuildFromGguf uploads them at load; prebuilt fixtures fill them lazily in the first
+    // forwards, which take the per-layer-submission path): 1 = every layer takes RecordMoeDecodeFast, 2 = some layers need the general
+    // device-resident MoE layer (fusable with FuseMixedMoeDecode), -1 = not fusable (CPU-placed or tiered layers). 0 re-checks.
+    private int _fuseDecodeLatch;
+    private bool[]? _fuseGeneralLayer;
+
+    /// <summary>Single-token forwards that ran as one command buffer (#1814 proof hook), and how many general MoE layers they carried.</summary>
+    internal long FusedDecodeForwards { get; private set; }
+    internal long FusedDecodeGeneralLayers { get; private set; }
 
     private bool CanFuseMoeDecode(int hiddenSize)
     {
-        if (_fuseDecodeOk) return true;
-        if (!_residentMoeEnabled) return false;
-        for (int l = 0; l < _cpuLayers.Length; l++)
+        if (_fuseDecodeLatch == 0)
         {
-            if (_cpuMoeLayer[l]) return false;
-            var b = _residentMoeBundles[l];
-            if (b is null || !CanRecordMoeDecodeFast(b, 1, hiddenSize)) return false;
+            if (!_residentMoeEnabled) return false;
+            var general = new bool[_cpuLayers.Length];
+            int state = 1;
+            for (int l = 0; l < _cpuLayers.Length; l++)
+            {
+                if (_cpuMoeLayer[l]) { state = -1; break; }
+                var b = _residentMoeBundles[l];
+                if (b is null) return false;
+                if (CanRecordMoeDecodeFast(b, 1, hiddenSize)) continue;
+                if (b.Tier is not null) { state = -1; break; }   // tiering ends the command buffer for host work after top-k
+                general[l] = true; state = 2;
+            }
+            _fuseGeneralLayer = general;
+            _fuseDecodeLatch = state;
         }
-        return _fuseDecodeOk = true;
+        return _fuseDecodeLatch == 1 || (_fuseDecodeLatch == 2 && FuseMixedMoeDecode);
     }
 
     /// <summary>
@@ -1426,8 +1450,22 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
             KernelSupport.ComputeTransferFullBarrier(cmdBuf);
             RecordMoeHybridTokenMixing(cmdBuf, layer, layerBuf, kinds, 1, hiddenSize, eps, positions, gdnCache, kvCache, numHeads, numKvHeads, headDim);
             KernelSupport.ComputeTransferFullBarrier(cmdBuf);
-            RecordMoeDecodeFast(cmdBuf, _residentMoeBundles[layer]!, layerBuf, hiddenSize, eps);
+            if (_fuseGeneralLayer is { } gen && gen[layer])
+            {
+                // #1814: the general device-resident MoE layer, exactly as RunGpuPlacedMoeLayer records it, minus its submit.
+                FusedDecodeGeneralLayers++;
+                RecordCopyBufferRange(cmdBuf, _state.HiddenState, _state.Residual, 0, 0, (ulong)((long)hiddenSize * sizeof(float)));
+                KernelSupport.TransferToComputeBarrier(cmdBuf);
+                _kernels.RmsNorm.Record(cmdBuf, _state.HiddenState, layerBuf.PostAttnNormWeight, _state.NormOutput, rowCount: 1, n: hiddenSize, eps: eps);
+                KernelSupport.ComputeToComputeBarrier(cmdBuf);
+                RecordMoeLayer(cmdBuf, _residentMoeBundles[layer]!, layerBuf.PostAttnNormWeight, 1, hiddenSize, eps);
+                KernelSupport.ComputeToComputeBarrier(cmdBuf);
+                _kernels.Add.Record(cmdBuf, _state.Residual, _state.NormOutput, _state.HiddenState, hiddenSize);
+            }
+            else
+                RecordMoeDecodeFast(cmdBuf, _residentMoeBundles[layer]!, layerBuf, hiddenSize, eps);
         }
+        FusedDecodeForwards++;
 
         KernelSupport.ComputeTransferFullBarrier(cmdBuf);
         long rowBytes = (long)hiddenSize * sizeof(float);
@@ -1435,8 +1473,9 @@ public sealed partial class VulkanQwen3MoeHybridTransformerModel : IModel
         KernelSupport.TransferToComputeBarrier(cmdBuf);
         _kernels.RmsNorm.Record(cmdBuf, _state.NormOutput, _weights.OutputNormWeight, _state.NormOutput, rowCount: 1, n: hiddenSize, eps: eps);
         KernelSupport.ComputeToComputeBarrier(cmdBuf);
-        RecordMatmul(cmdBuf, _weights.OutputWeight, _weights.OutputDeviceQuantType, _state.NormOutput, _state.Logits,
-            outputDim: _weights.OutputOutputDim, inputDim: _weights.OutputInputDim, seqLen: 1);
+        if (PerturbSkip != "head")   // #1814 perturbation: timing attribution only, logits are stale
+            RecordMatmul(cmdBuf, _weights.OutputWeight, _weights.OutputDeviceQuantType, _state.NormOutput, _state.Logits,
+                outputDim: _weights.OutputOutputDim, inputDim: _weights.OutputInputDim, seqLen: 1);
         KernelSupport.ComputeToHostBarrier(cmdBuf);
         _submit.SubmitAndWait();
 
