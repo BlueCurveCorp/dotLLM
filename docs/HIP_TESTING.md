@@ -6,8 +6,7 @@ branch or its merged target `dev`. The submission fork is `BlueCurveCorp/dotLLM`
 its clean `main` and the historical BlueCurve donor snapshot do not contain this
 integration merely because they share the same repository URL. Read [HIP.md](HIP.md) for the supported subset and
 [PRECISION.md, section 9](PRECISION.md#9-hip-dense-integration-rx-6900-xt) for the
-recorded measurements. The independent review prompt is
-[HIP_ADVERSARIAL_REVIEW.md](HIP_ADVERSARIAL_REVIEW.md).
+recorded measurements.
 
 All required harnesses are tracked. A fresh checkout does not need the original
 developer's private `.docs/` files. Commands below create new output there;
@@ -24,7 +23,7 @@ models, corpora and reference logits belong in an external store.
 | Context runner | Actual 1K/2K/4K/8K history and bounded numerical/memory comparisons on one pinned model/text | Full-corpus perplexity, general quality or throughput |
 
 The recorded hardware qualification used Windows, RX 6900 XT (`gfx1030`, 16 GB),
-HIP SDK 6.4.2 and driver 32.0.21045.16010. `gfx1100` was compiled but not executed.
+HIP SDK 6.4.2 and driver 32.0.21045.16010. The 2026-11-16 rebuild includes `gfx1030`, `gfx1100` and `gfx1151`; only `gfx1030` was executed.
 The available Ubuntu/WSL environment compiled ROCm 7.2.4 kernels but could not
 initialize a HIP GPU. **Linux GPU inference and physical AIS remain unqualified.**
 
@@ -80,7 +79,7 @@ python tests/scripts/generate_packed_hf_reference.py <external-AWQ-directory>
 python tests/scripts/generate_packed_hf_reference.py <external-GPTQ-directory>
 ```
 
-It writes `packed-reference.json` beside each checkpoint. It executes the pinned
+It writes generated JSON to `~/.dotllm/test-cache/packed-oracles/<model-sha256>.json`, separately from model files. It verifies the downloaded source hash **before executing** the pinned
 AutoAWQ `88e4c76b20755db275574e6a03c83c84ba3bece5` / AutoGPTQ
 `9f7d37072917ab3a7545835f23e808294a542153` producer unpacking code and the HF eager
 Llama implementation, with F32 reference storage/accumulation. This expansion is
@@ -159,17 +158,16 @@ The paths below are examples; select the installed SDK and external model store.
 $env:HIP_PATH = 'C:\Program Files\AMD\ROCm\6.4'
 $env:PATH = "$env:HIP_PATH\bin;$env:PATH"
 $env:DOTLLM_TEST_HIP_REQUIRED = '1'
-$env:DOTLLM_HIP_ALLOW_Q8_KV = '1'
 $env:DOTLLM_TEST_HIP_BF16_MODEL = 'E:\models\HuggingFaceTB\SmolLM2-135M-Instruct'
 $env:DOTLLM_TEST_HIP_HF_MODEL = 'E:\models\HuggingFaceTB\SmolLM2-135M-Instruct-F16-derived'
 $env:DOTLLM_TEST_TINYLLAMA_AWQ = 'E:\models\TheBloke\TinyLlama-1.1B-Chat-v1.0-AWQ'
 $env:DOTLLM_TEST_TINYLLAMA_GPTQ = 'E:\models\TheBloke\TinyLlama-1.1B-Chat-v1.0-GPTQ'
-$env:HIP_ARCHS = 'gfx1030 gfx1100'
+$env:HIP_ARCHS = 'gfx1030 gfx1100 gfx1151'
 pwsh native/hip/build.ps1
 dotnet build src/DotLLM.Hip/DotLLM.Hip.csproj -c Release -p:RequireHipKernels=true
 ```
 
-Stop if either native/build command fails. DirectStorage is a separate prerequisite.
+Stop if either native/build command fails. Native compilation is explicit: ordinary .NET builds consume the committed objects; `-p:BuildHipKernels=true` rebuilds them. Preserve `native/hip/co/MANIFEST` with compiler, targets, source and output hashes. DirectStorage is a separate prerequisite: run `dotllm directstorage install` interactively to review its license and install the pinned runtime.
 For clean publish tests set `DOTLLM_DIRECTSTORAGE_DIR` to an installed directory
 containing `dstorage.dll` and `dstoragecore.dll`; see [HIP.md](HIP.md#direct-disk-to-device-loading).
 A development restore provides the private DirectStorage NuGet package, but
@@ -182,7 +180,7 @@ dotnet test tests/DotLLM.Tests.Unit/DotLLM.Tests.Unit.csproj -c Release --filter
 ```
 
 Then run the complete HIP-specific selection, with all four fixture directories
-above populated (including both `packed-reference.json` files):
+above populated and both hash-keyed generated oracles present under test-cache:
 
 ```powershell
 dotnet test tests/DotLLM.Tests.Unit/DotLLM.Tests.Unit.csproj -c Release --filter 'FullyQualifiedName~DotLLM.Tests.Unit.Hip.|FullyQualifiedName~HipRuntimeCandidateTests|FullyQualifiedName~HipDeviceResolutionTests|FullyQualifiedName~HipSafetensorsApplicationTests' --logger 'trx;LogFileName=hip.trx' --results-directory .docs/hip-testing/run-001
@@ -214,18 +212,10 @@ individually. The historical combined selection was 734 passed / 27 skipped /
 
 ## Long-context quality
 
-HIP uses F16 KV by default. Selecting Q8 for **either** plane requires the exact
-process environment value `DOTLLM_HIP_ALLOW_Q8_KV=1`, plus the existing cache
-selection, for example `--cache-type-k q8_0 --cache-type-v q8_0`. Setting the
-variable alone does not select Q8. It acknowledges the measured precision loss;
-it does not improve the numerical results. This gate does not affect Q8 model
-weights or other backends.
-
-Test rejection with the variable unset, then acceptance with `1`, for Q8/F16,
-F16/Q8 and Q8/Q8 through `run`, `chat`, `serve` and library cache creation. F16/F16
-must continue to work without it. Use the automated gate tests for invalid values
-and early rejection. An unacknowledged Q8 request must explain the precision loss
-and how to opt in.
+HIP uses F16 KV by default. Select Q8 through the standard flags, for example
+`--cache-type-k q8_0 --cache-type-v q8_0`. No HIP-specific acknowledgement
+variable is required. Q8 remains lossy; retain the original numerical gates and
+report failed comparisons instead of treating explicit selection as a quality pass.
 
 The tracked portable runner builds the **current checkout**, not a frozen private
 DLL. Start with 1K, then use a fresh result directory for 8K. These examples use
@@ -234,7 +224,6 @@ PowerShell variables pointing to external fixtures:
 ```powershell
 $model = 'E:\models\unsloth\SmolLM2-135M-Instruct-GGUF\SmolLM2-135M-Instruct-F16.gguf'
 $corpus = 'E:\corpora\alice-11.utf8.txt'
-$env:DOTLLM_HIP_ALLOW_Q8_KV = '1'
 dotnet run --project tests/scripts/hip-context-qualification/HipContextQualification.csproj -c Release --artifacts-path .docs/hip-testing/build -- --model $model --corpus $corpus --output .docs/hip-testing/context-1k --max-context 1024
 $contextExit = $LASTEXITCODE
 dotnet run --project tests/scripts/hip-context-qualification/HipContextQualification.csproj -c Release --artifacts-path .docs/hip-testing/build -- validate --results .docs/hip-testing/context-1k/results.jsonl
@@ -249,7 +238,7 @@ target 8,192. Merely reserving an 8K cache is insufficient.
 
 The runner also supports `--cpu-only` with a separate output directory. This
 explicitly skips HIP and is useful for corpus/oracle validation on a build VM.
-It is not GPU qualification. The runner never enables the Q8 opt-in itself.
+It is not GPU qualification. Both probes have their own assembly names: `HipContextQualification` and `HipLinuxProbe`, with explicit friend access in the HIP project.
 
 | Exit | Meaning |
 | ---: | --- |
@@ -263,7 +252,7 @@ An exit of 10 is expected when reproducing that Q8 result, but remains a quality
 failure. Do not accept an F16 failure merely because the overall exit is also 10.
 The format tests above use their separate short-row KL < .001 gate.
 
-At 8K the historical HIP Q8 versus CPU F32 maximum L2 was .050690 and KL .0038931;
+In the historical 2026-11-14 pre-extraction run, at 8K HIP Q8 versus CPU F32 maximum L2 was .050690 and KL .0038931;
 F16 was .006174 / .00005271. Q8 had 504/512 top-1 matches across all windows and
 bounded combined PPL increased about .1553%. Independent CPU Q8 also failed the
 gates; this establishes quantization loss without isolating a HIP-specific defect.
@@ -280,9 +269,17 @@ zero bytes; model disposal releases owned weights/compute allocations. Keep
 payload, aligned allocations, compute scratch, caller-owned logits and driver-wide
 memory deltas separate. Driver allocator retention is not an owned-memory counter.
 
-The historical 8K run used `e2de144`; a later native-object replay checked 1K only
+The historical 2026-11-14 8K run used pre-extraction commit `e2de144` and dense binary SHA256 `CA16ABD3BEA6584C8B2A857631D43BC227D65A2E4A8CE82E1DE92F79345C90DC`. A later replay with `5BB968AF7A33B4ABA4B4C98A7B3F4163EEB56BEA7B91CFA139E9015E228217A7` checked 1K only
 and matched aggregate metrics, not retained raw-logit bytes. A new 8K run of this
 portable runner qualifies the current artifacts only when it actually completes.
+
+The 2026-11-16 review rerun used the renamed runner and three-target dense binary
+`c6212821b0c94262c4d32a687708641caafeabfef63ac7236ddb02baa3907c18` on Windows/RX 6900 XT,
+without an acknowledgement variable. It completed **1K only**: F16 L2/KL
+`.01067701 / .000240835` passed; Q8 `.04876321 / .00570866` failed. All five
+comparison aggregates matched the historical 1K metrics. Owned memory returned
+to zero and both the rotated-vocabulary and shortened-context controls were
+rejected (runner exit 10, validator exit 0). This is not a new 8K qualification.
 
 ## Linux: build checks first, then actual hardware qualification
 
@@ -295,7 +292,7 @@ For Linux x64 with .NET, a C++ compiler and ROCm headers/compiler:
 ```bash
 export PATH=/opt/rocm/bin:$PATH
 export LD_LIBRARY_PATH=/opt/rocm/lib:${LD_LIBRARY_PATH:-}
-HIP_ARCHS="gfx1030 gfx1100" bash native/hip/build.sh
+HIP_ARCHS="gfx1030 gfx1100 gfx1151" bash native/hip/build.sh
 dotnet build src/DotLLM.Hip/DotLLM.Hip.csproj -c Release -p:RequireHipKernels=true
 ROCM_PATH=/opt/rocm DOTNET=dotnet bash tests/scripts/hip-linux-direct-io/run.sh
 ```
@@ -309,13 +306,19 @@ dotnet test tests/DotLLM.Tests.Unit/DotLLM.Tests.Unit.csproj -c Release \
   --logger 'trx;LogFileName=linux-managed.trx' --results-directory .docs/hip-testing/linux
 ```
 
-The last command builds a private `libamdhip64.so` test double and runs the
+The `run.sh` command builds a private `libamdhip64.so` test double and runs the
 production Linux loader with real libc `O_DIRECT` reads. Its 54 checks cover exact
 offsets/tails, >32 MiB chunking, independent lifetime, ABI and injected failures.
 Outputs are under `.docs/linux-hip-qualification`; use a fresh checkout/output
 capture to avoid confusing runs. It sets the simulated runtime path only for
 the probe child process. **Never add its `stub` directory to the environment for
 real hardware tests.** Compilation and this probe are not AIS/GPU evidence.
+
+On 2026-11-16 the renamed `HipLinuxProbe` passed all 54 checks in Ubuntu 24.04 WSL,
+with seven allocations/frees, zero bad frees and zero ABI violations. ROCm 7.2.4
+compiled all three targets into scratch outputs, with a compiler/source/binary
+manifest; tracked Windows binaries stayed unchanged. The probe initially exposed
+a missing scratch manifest, fixed by using the production native build script.
 
 For actual GPU qualification, use native Linux x64 or a separately validated
 passthrough system. A successful `rocminfo` must enumerate the intended GPU;
@@ -363,7 +366,6 @@ checks; the dense model path itself does not require hipBLAS. Then run the porta
 context runner with the real GGUF on the qualified volume:
 
 ```bash
-export DOTLLM_HIP_ALLOW_Q8_KV=1
 dotnet run --project tests/scripts/hip-context-qualification/HipContextQualification.csproj \
   -c Release --artifacts-path .docs/hip-testing/linux-build -- \
   --model /path/on/ais-volume/SmolLM2-135M-Instruct-F16.gguf \
@@ -409,7 +411,7 @@ dotnet pack src/DotLLM.Cli/DotLLM.Cli.csproj -c Release -p:DotLLMBundleDirectSto
 ```
 
 Inspect the publish directory and NuGet ZIP entries: `dense_f16.co` and
-`rmsnorm.co` must be present with the hashes of the intended compiler output;
+`rmsnorm.co` and `co/MANIFEST` must be present with the hashes of the intended compiler output;
 the package must contain `DotLLM.Hip.dll`. Inspect the single-file manifest too
 when verifying assembly inclusion. There must be no `dstorage.dll` or
 `dstoragecore.dll` in either release artifact. Record package/executable hashes.
@@ -448,22 +450,35 @@ The same JSON requests work with Linux `curl`. Save responses in the report
 directory and stop the foreground server with Ctrl+C, checking its exit status.
 
 Also test explicit failures: missing native image, unavailable/invalid HIP device,
-unsupported geometry or quantization, missing direct-loading prerequisite, and
-Q8 without acknowledgement. They must report an error rather than run on CPU.
+unsupported geometry or quantization and missing direct-loading prerequisites. They must report an error rather than run on CPU.
 Use isolated artifact copies for missing-file tests; do not remove shared SDK files.
 
 ## Report template and acceptance
 
-The 2026-11-14 opt-in/harness follow-up passed the bounded combined selection:
-745 passed, 27 skipped, zero failures. Focused gate tests passed 36/36; deliberately
-requiring both Q8 planes instead of either, and removing the library constructor
-gate, each caused the intended tests to fail. Real CLI Q8 opt-in and default F16
-generation succeeded. A current-source Windows 1K runner replay preserved the
-recorded F16 pass and Q8 failures, with artifact validation and memory release.
-Ubuntu/WSL built the runner with zero warnings/errors and completed CPU-only 1K
-with exit 10 and validator exit 0; both negative controls were caught. This follow-up
-did not repeat the full 8K run or exercise physical Linux GPU/AIS. The inline F16
-fixture-generation recipe above was syntax-checked, not executed in this follow-up.
+### Investigating a test-host shutdown hang
+
+On 2026-11-16, separate processes for HIP enumeration and full readiness exited
+normally on the RX 6900 XT host (158 ms / 1,320 ms). The host also enumerated its
+unsupported `gfx1036` APU. HIP tests and application cancellation/shutdown tests
+exited normally too. This does not reproduce or fix the reported Strix Halo hang.
+
+On the affected host, run the smallest reproducing test selection in a new
+process and retain the final console line, process ID, driver/runtime versions,
+loaded binary hashes and whether the process remains after tests finish:
+
+```text
+dotnet test tests/DotLLM.Tests.Unit/DotLLM.Tests.Unit.csproj -c Release --filter FullyQualifiedName~HipDeviceResolutionTests --blame-hang --blame-hang-timeout 2m --diag .docs/hip-testing/hang-vstest.log
+```
+
+Compare inventory-only/CPU `auto` startup with explicit HIP readiness, then one
+context create/dispose, a kernel and a model load/dispose. Increase scope only
+until the hang returns. VSTest's inactivity timeout is not a guaranteed watchdog
+for a host stuck after reporting completion: capture a native/managed process
+dump while it is still alive, then terminate only that test process. A dump's
+blocked stacks are needed to distinguish runtime teardown, driver waits and
+application cleanup; do not infer the cause from device enumeration alone.
+
+The 2026-11-16 review rebuild is recorded in [native kernel qualification](../native/hip/README.md#qualification), including binary hashes and executed tests. Historical counts are not acceptance targets for a changed checkout. Record fresh counts and audit skips.
 
 ```text
 Target repository, branch, HEAD, baseline and working diff:

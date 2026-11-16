@@ -103,7 +103,7 @@ internal static class Program
         {
             if (args is ["--help"])
             {
-                Console.WriteLine("--model <external SmolLM2-135M F16 GGUF> --corpus <external Gutenberg Alice11 UTF8> --output <fresh .docs or external directory> [--max-context 1024|2048|4096|8192] [--cpu-only]\nvalidate --results <output/results.jsonl>\nExit 0: all original quality gates pass (or artifact validation passes); 10: completed with numerical gate failures; 2: runtime/provenance/harness failure. GPU Q8 requires user-set DOTLLM_HIP_ALLOW_Q8_KV=1. No fixture downloads or acknowledgement changes are performed.");
+                Console.WriteLine("--model <external SmolLM2-135M F16 GGUF> --corpus <external Gutenberg Alice11 UTF8> --output <fresh .docs or external directory> [--max-context 1024|2048|4096|8192] [--cpu-only]\nvalidate --results <output/results.jsonl>\nExit 0: all original quality gates pass (or artifact validation passes); 10: completed with numerical gate failures; 2: runtime/provenance/harness failure. Includes Q8 KV with documented precision loss. No fixture downloads are performed.");
                 return 0;
             }
             if (args is ["validate", "--results", var results])
@@ -165,8 +165,6 @@ internal static class Program
             Require(!Inside(model!, repository) && !Inside(corpus!, repository), "Model and corpus must remain outside the repository");
             if (Inside(output!, repository)) Require(Inside(output!, Path.Combine(repository, ".docs")), "In-repository results must be under ignored .docs");
         }
-        if (!cpuOnly) Require(Environment.GetEnvironmentVariable("DOTLLM_HIP_ALLOW_Q8_KV") is "1",
-            "GPU qualification includes experimental Q8 KV: explicitly set DOTLLM_HIP_ALLOW_Q8_KV=1 to acknowledge its failed original parity gates");
         return new(model!, corpus!, output!, maxContext, cpuOnly);
     }
 

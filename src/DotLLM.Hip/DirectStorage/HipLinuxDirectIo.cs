@@ -72,7 +72,7 @@ internal static unsafe partial class HipLinuxDirectIo
                 throw new NotSupportedException("Linux HIP weight loading requires a regular model file.");
             if (StatFileSystem(file, out var fs) != 0)
                 throw IoError("fstatfs", Marshal.GetLastPInvokeError());
-            if (fs.Type is not (0xef53 or 0x58465342))
+            if (fs.Type is not (0xef53 or 0x58465342)) // linux/magic.h: EXT4_SUPER_MAGIC, XFS_SUPER_MAGIC.
                 throw new NotSupportedException("Linux HIP direct loading requires an ext4 or XFS model volume with a GPU-accessible storage path. Host-copy fallback is disabled.");
             return file;
         }

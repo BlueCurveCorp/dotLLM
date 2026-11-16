@@ -13,12 +13,15 @@ HIP is **explicit-only**. `--device auto` continues to try CUDA, Vulkan, then CP
 An explicit HIP request fails if the runtime, selected device, code objects, model
 format or direct-loading path is unavailable. It never falls back to CPU.
 
+For reproducible build, model, application and Linux checks, use the
+[integration testing handbook](HIP_TESTING.md).
+
 ## Q8 KV precision
 
 F16 remains the default. Select Q8 through the standard cache options; no HIP-specific acknowledgement variable is required.
 
 ```bash
-DOTLLM_HIP_ALLOW_Q8_KV=1 dotllm run /path/to/model.gguf --device hip --cache-type-k q8_0 --cache-type-v q8_0 -p "Hello"
+dotllm run /path/to/model.gguf --device hip --cache-type-k q8_0 --cache-type-v q8_0 -p "Hello"
 ```
 
 Q8 compresses each 32-value KV block into 32 signed bytes and a half-precision scale.
@@ -93,8 +96,7 @@ separate MTP/DFlash heads. There is no runtime BF16-to-F16 checkpoint conversion
 
 `GET /v1/devices` distinguishes runtime availability from inference readiness.
 HIP entries report `servable` and a `note` per device. Readiness checks load the
-complete dense kernel manifest on that device and initialize its DirectStorage
-session. Automatic selection only enumerates HIP; it does not open contexts,
+complete dense kernel manifest on that device and initialize its platform loading path. Automatic selection only enumerates HIP; it does not open contexts,
 streams, kernels or DirectStorage. Readiness is cached after an explicit HIP load
 or devices query. Missing assets or an unsupported device remain visible but unselectable.
 This preflight does not promise that a particular model will fit in free memory.

@@ -9,6 +9,8 @@
   <ItemGroup>
     <InternalsVisibleTo Include="DotLLM.Tests.Unit" />
     <InternalsVisibleTo Include="DotLLM.Tests.Integration" />
+    <InternalsVisibleTo Include="HipLinuxProbe" />
+    <InternalsVisibleTo Include="HipContextQualification" />
   </ItemGroup>
 
   <ItemGroup>
