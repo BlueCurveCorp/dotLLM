@@ -41,6 +41,8 @@ public sealed class SafetensorsApplicationTests : IDisposable
         using var state = ServerStartup.LoadModel(directory, Options(directory, device));
         Assert.Equal("cpu", state.Options.ResolvedDevice);
         Assert.Equal(device == "auto", state.DeviceFallbackWarning is not null);
+        if (device == "auto")
+            Assert.DoesNotContain("--device hip", state.DeviceFallbackWarning!, StringComparison.Ordinal);
         Assert.Null(state.CurrentGguf);
         Assert.NotNull(state.CurrentSafetensors);
         Assert.Equal("user:Hello;assistant:", state.ChatTemplate!.Apply(
@@ -237,9 +239,9 @@ public sealed class SafetensorsApplicationTests : IDisposable
         using var result = JsonDocument.Parse(output);
         Assert.Equal("cpu", result.RootElement.GetProperty("backend").GetProperty("resolved_device").GetString());
         using var state = ServerStartup.LoadModel(directory, Options(directory));
-        string rendered = state.ChatTemplate!.Apply([new ChatMessage { Role = "user", Content = "Hello" }],
-            new ChatTemplateOptions { AddGenerationPrompt = true });
-        Assert.Equal(await Generate(state, rendered), result.RootElement.GetProperty("text").GetString());
+        Assert.Equal(await Generate(state, "Hello"), result.RootElement.GetProperty("text").GetString());
+        Assert.Equal(state.Tokenizer!.Encode("Hello").Length,
+            result.RootElement.GetProperty("usage").GetProperty("prompt_tokens").GetInt32());
     }
 
     [Theory]

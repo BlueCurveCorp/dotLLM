@@ -40,6 +40,8 @@
 
   <ItemGroup>
     <HipKernel Include="$(HipKernelDir)\*.hip" />
+    <Content Include="$(HipCoOutputDir)\MANIFEST" Link="co\MANIFEST" ExcludeFromSingleFile="true"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="@(HipKernel->'$(HipCoOutputDir)\%(Filename).co')">
       <Link>co\%(Filename)%(Extension)</Link>
       <ExcludeFromSingleFile>true</ExcludeFromSingleFile>

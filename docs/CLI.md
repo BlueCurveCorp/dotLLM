@@ -79,7 +79,7 @@ silent CPU run**; only `auto` falls through (CUDA, then Vulkan, then CPU). After
 `--gpu-layers N` is CUDA partial offload (the other layers run on the CPU) and is ignored on Vulkan, where the model is device-resident. MoE expert
 placement is controlled by the `--moe-*`, `--cpu-moe` and `--n-cpu-moe` options ([MOE_OFFLOAD.md](MOE_OFFLOAD.md)).
 HIP requires full GPU placement. K/V independently accepts F16 or Q8_0 (head dimensions divisible by 32); partial offload, F32/Q4_0 KV and mixed-precision windows are errors. Its device KV pages grow on demand.
-F16 is the HIP default. Selecting Q8_0 for either plane also requires `DOTLLM_HIP_ALLOW_Q8_KV=1`, acknowledging measured precision loss and failed 1K–8K logit quality gates. This affects KV storage, not Q8 model weights. See [the opt-in and measurements](HIP.md#experimental-q8-kv-opt-in).
+F16 is the HIP default. Select Q8_0 through the standard cache flags, without a HIP-specific environment gate. Measured Q8 precision loss and failed 1K–8K logit gates remain documented in [HIP.md](HIP.md#q8-kv-precision).
 Local HF SafeTensors directories work with `run`, `chat` and `serve`: CPU under `cpu`/`auto`, or explicit HIP for supported F16 checkpoints. HF chat templates are read from the checkpoint before loading weights. Unsupported HF overlays, RoPE/context overrides, separate draft heads and expert offload options fail explicitly.
 Backend background: [GPU.md](GPU.md), [VULKAN.md](VULKAN.md), [CUDA.md](CUDA.md), [HIP.md](HIP.md).
 
@@ -842,7 +842,6 @@ Some variables are read at process start, others per model load - set them befor
 | `DOTLLM_CUDA_VRAM_RESERVE_MB` | 256 | VRAM headroom kept free by CUDA fit planning. |
 | `CUDA_PATH`, `CUDA_HOME` | system | Where the CUDA runtime libraries are looked up. |
 | `DOTLLM_HIP_PATH` | system | Where the HIP runtime is looked up (then `HIP_PATH`, `ROCM_PATH`, `~/.dotllm/rocm`). |
-| `DOTLLM_HIP_ALLOW_Q8_KV` | unset (disabled) | Set to exactly `1` to acknowledge experimental HIP Q8 KV precision loss. Also select `--cache-type-k q8_0` and/or `--cache-type-v q8_0`; F16 remains the default. Applies to library cache creation too. |
 | `DOTLLM_CPU_ISA` | auto | Caps the CPU SIMD tier used by kernels (for A/B and bug isolation); see [CPU_FEATURE_GATING.md](CPU_FEATURE_GATING.md). |
 | `DOTLLM_HYBRID_KV` | `f16` | KV format of the CUDA hybrid-dense models: `f16`, `q8_0`, `q4_0`, `k8v4`, `k4v8` (flags win). |
 | `DOTLLM_VK_KV` | `f16` | KV format of Vulkan caches that honour it (`f16`, `f32`; `q8_0` for Flint). |
@@ -1314,3 +1313,7 @@ ending `_LEGACY`, `DISABLE_*` or `*_PROFILE` / `*_TRACE` / `*_DEBUG` is typicall
 | `DOTLLM_VULKAN_WEIGHT_ARENA` | Tensors at least this large get their own allocation. | `VulkanWeightArena.cs` |
 
 <!-- END env-appendix -->
+
+## dotllm directstorage install
+
+Downloads the pinned Microsoft DirectStorage runtime on Windows x64/ARM64 and installs it only after interactive license acceptance. Reuses an existing installation when available. HIP requires these DLLs; releases do not bundle them. Run this command again after declining the startup offer. No options.

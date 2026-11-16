@@ -153,7 +153,7 @@ public static class DeviceModelLoader
             if (requestedGpuLayers is not null and not 0)
                 throw new NotSupportedException("SafeTensors CPU loading has no GPU offload. Omit --gpu-layers, or select --device hip for supported full-device F16 models.");
             string? warning = spec.Kind == DeviceKind.Auto
-                ? "Running SafeTensors on the CPU: --device auto does not opt into experimental HIP. Select --device hip:N explicitly for supported F16 checkpoints."
+                ? "Running SafeTensors on the CPU: --device auto uses the CPU loader for this format. Pass --device cpu to silence this warning."
                 : null;
             log($"CPU SafeTensors inference ({threading.EffectiveThreadCount} threads)");
             var (model, source, _) = ModelLoader.LoadFromSafetensors(directory, threading);
@@ -163,7 +163,7 @@ public static class DeviceModelLoader
         if (requestedGpuLayers == 0)
             throw new NotSupportedException("HIP requires full-device loading; --gpu-layers 0 is unsupported.");
         long bytes = WeightFileBytes(directory);
-        var plan = DeviceSelector.Plan(spec, bytes, Endpoints.DeviceEndpoint.Describe());
+        var plan = DeviceSelector.Plan(spec, bytes, Endpoints.DeviceEndpoint.Describe(validateHip: true));
         if (plan.Error is not null)
             throw new DeviceUnavailableException(DeviceSelector.ExplicitFailureMessage(requestedDevice, Path.GetFileName(directory), bytes, plan.Error));
 
@@ -194,9 +194,7 @@ public static class DeviceModelLoader
         if (!IsSupported(key) || !IsSupported(value)
             || cacheWindow != 0)
             return "HIP supports only F16 or Q8_0 K/V storage with no mixed-precision window. Each side may select f16 or q8_0; Q8_0 requires head dimensions divisible by 32.";
-        return DotLLM.Hip.HipPagedKvCache.ExperimentalQ8Error(
-            key?.Trim().ToLowerInvariant() == "q8_0" ? KvCacheDType.Q8_0 : KvCacheDType.F32,
-            value?.Trim().ToLowerInvariant() == "q8_0" ? KvCacheDType.Q8_0 : KvCacheDType.F32);
+        return null;
     }
 
     /// <summary>
@@ -297,7 +295,7 @@ public static class DeviceModelLoader
         ThreadingConfig threading, long modelBytes, string modelName, Action<string> log, Action<string> warn,
         MoeOffloadOptions? moeOffload = null)
         => LoadWith(gguf, config, requestedDevice, requestedGpuLayers, threading, modelBytes, modelName, log, warn,
-            Endpoints.DeviceEndpoint.Describe(),
+            Endpoints.DeviceEndpoint.Describe(validateHip: DeviceSpec.Parse(requestedDevice).Kind == DeviceKind.Hip),
             (device, layers) => LoadExact(gguf, config, device, layers, threading, log, warn, moeOffload), moeOffload);
 
     /// <summary>

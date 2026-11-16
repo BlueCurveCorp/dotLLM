@@ -74,7 +74,7 @@ its own pages allocated as the sequence grows, regardless of generic CPU cache f
 
 HF directories must contain `config.json`, tokenizer assets and either a SafeTensors
 file or `model.safetensors.index.json`. `auto` chooses CPU for HF; HIP requires an
-explicit device. Declared HF chat templates are validated before weights load, and
+explicit device. `run` keeps prompts raw unless tools are requested. Used HF chat templates are validated before weights load, and
 named `tool_use` templates are selected when a request supplies tools. HF application
 loading rejects unsupported overlays, RoPE/context overrides, expert offload and
 separate MTP/DFlash heads. There is no runtime BF16-to-F16 checkpoint conversion.
@@ -82,7 +82,9 @@ separate MTP/DFlash heads. There is no runtime BF16-to-F16 checkpoint conversion
 `GET /v1/devices` distinguishes runtime availability from inference readiness.
 HIP entries report `servable` and a `note` per device. Readiness checks load the
 complete dense kernel manifest on that device and initialize its DirectStorage
-session. Missing assets or an unsupported device remain visible but unselectable.
+session. Automatic selection only enumerates HIP; it does not open contexts,
+streams, kernels or DirectStorage. Readiness is cached after an explicit HIP load
+or devices query. Missing assets or an unsupported device remain visible but unselectable.
 This preflight does not promise that a particular model will fit in free memory.
 The WebUI offers only servable devices and leaves HIP as an explicit choice.
 
@@ -121,7 +123,7 @@ future GEMM work, but missing hipBLAS does not prevent this dense path from runn
 `native/hip/kernels/dense_f16.hip` provides embedding, F32-to-F16 conversion, RMSNorm,
 linear projection, residual addition, SwiGLU, RoPE, KV page writes and paged attention.
 `rmsnorm.hip` retains the standalone RMSNorm pipeline. `hipcc --genco` compiles fat
-code objects with `gfx1030` and `gfx1100` images. There is no custom native shim.
+code objects with `gfx1030`, `gfx1100` and `gfx1151` images. There is no custom native shim.
 
 ```powershell
 # Run from a VS x64 C++ developer environment with the HIP SDK on PATH.
@@ -131,9 +133,10 @@ dotnet build src/DotLLM.Hip
 
 `native/hip/build.sh` supplies the equivalent build on a ROCm development host.
 Set `HIP_ARCHS` for the scripts, or `HipOffloadArchs` for MSBuild, to change targets.
-`RequireHipKernels=true` makes native validation fail when compilation is required
-but the compiler is missing. Ordinary consumers use the precompiled repository
-code objects without installing a compiler.
+`BuildHipKernels=true` explicitly rebuilds the tracked objects and their hash/compiler
+manifest. `RequireHipKernels=true` checks object availability without compiling.
+Ordinary consumers use the precompiled objects without installing a compiler or
+changing tracked binaries based on timestamps.
 
 Code objects stay outside single-file executables in `co/` beside the binary.
 Native archives and the dotnet-tool package must contain `dense_f16.co` and

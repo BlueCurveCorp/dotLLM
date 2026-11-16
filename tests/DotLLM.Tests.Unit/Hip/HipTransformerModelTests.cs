@@ -38,7 +38,9 @@ public sealed partial class HipTransformerModelTests(ITestOutputHelper output)
         Assert.True(model.WeightMemoryBytes >= model.StoredWeightBytes);
         long compute = model.ComputeMemoryBytes;
 
-        using (var logits = model.Forward(tokens, Positions(0, tokens.Length), 0, cache, true))
+        Assert.Throws<ArgumentException>(() => model.Forward([1], [0], -2, cache));
+        Assert.Throws<ArgumentException>(() => model.Forward([1], [0], model.DeviceId + 1, cache));
+        using (var logits = model.Forward(tokens, Positions(0, tokens.Length), -1, cache, true))
         {
             Assert.Equal(new[] { 1, Vocab }, logits.Shape.Dimensions);
             Assert.Equal(DType.Float32, logits.DType);

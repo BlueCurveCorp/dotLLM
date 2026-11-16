@@ -139,7 +139,6 @@ public sealed class HipSafetensorsApplicationTests(ITestOutputHelper output)
         bool available = OperatingSystem.IsWindows() && HipDevice.IsAvailable();
         if (Environment.GetEnvironmentVariable("DOTLLM_TEST_HIP_REQUIRED") is "1") Assert.True(available);
         Skip.IfNot(available, "Windows HIP/DirectStorage is unavailable.");
-        using var environment = new HipQ8Environment(key is "q8_0" || value is "q8_0" ? "1" : null);
         using var fixture = new HfApplicationFixture();
         string directory = fixture.WriteCheckpoint("hip-cancel");
         using var state = ServerStartup.LoadModel(directory, new ServerOptions
@@ -163,7 +162,7 @@ public sealed class HipSafetensorsApplicationTests(ITestOutputHelper output)
             Assert.Equal(0, cache.AllocatedBytes);
             caches.Add(cache);
             return cache;
-        }, mtpEnabled: false, deviceId: model.DeviceId);
+        }, mtpEnabled: false);
 
         long peak = 0;
         using (var cancelled = new CancellationTokenSource())

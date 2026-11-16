@@ -93,22 +93,6 @@ internal static class DeviceCli
     }
 
     /// <summary>
-    /// Device resolution for checkpoints the CLI can only load on the CPU (HuggingFace safetensors). An explicit GPU request is an error;
-    /// <c>auto</c> resolves to the CPU with a prominent warning.
-    /// </summary>
-    public static Outcome ResolveCpuOnly(string device, string what, string modelName)
-    {
-        var spec = DeviceSpec.Parse(device);
-        if (spec.IsGpu)
-            throw new DeviceUnavailableException(DeviceSelector.ExplicitFailureMessage(
-                device, modelName, 0, $"{what} can only be loaded on the CPU by the CLI (no GPU loader for them yet)"));
-        string? warning = spec.Kind == DeviceKind.Auto
-            ? $"Running on the CPU: --device auto cannot use a GPU for {what} (CPU-only loader). Expect much lower throughput than a GPU run. Pass --device cpu to silence this."
-            : null;
-        return new Outcome(device, "cpu", warning, []);
-    }
-
-    /// <summary>
     /// Device resolution for commands that load through their own backend switch (<c>bench</c>, <c>perplexity</c>): parses, preflights an
     /// explicit GPU against the machine, resolves <c>auto</c> to the best servable device, and reports it. Returns null (after printing the
     /// error) when the request cannot be honoured - never a CPU fallback.

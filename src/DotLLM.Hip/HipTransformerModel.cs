@@ -178,7 +178,7 @@ public sealed unsafe class HipTransformerModel : IModel
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (deviceId != DeviceId) throw new ArgumentException($"This HIP model belongs to device {DeviceId}.", nameof(deviceId));
+            if (deviceId != -1 && deviceId != DeviceId) throw new ArgumentException($"This HIP model belongs to device {DeviceId}.", nameof(deviceId));
             if (tokenIds.IsEmpty || tokenIds.Length != positions.Length) throw new ArgumentException("HIP forward requires equally sized, nonempty tokens and positions.");
             if (!lastTokenLogitsOnly && tokenIds.Length > 1)
                 throw new NotSupportedException("HIP returns one logit row. Request lastTokenLogitsOnly for prefill, or score one token at a time.");
@@ -211,7 +211,7 @@ public sealed unsafe class HipTransformerModel : IModel
                     // The IModel sampling boundary owns one F32 logit row; resident GPU tensors remain F16.
                     var source = new ReadOnlySpan<Half>((void*)_hostLogits.DataPointer, Config.VocabSize);
                     var destination = new Span<float>((void*)result.DataPointer, Config.VocabSize);
-                    for (int i = 0; i < source.Length; i++) destination[i] = (float)source[i];
+                    System.Numerics.Tensors.TensorPrimitives.ConvertToSingle(source, destination);
                     return result;
                 }
                 catch

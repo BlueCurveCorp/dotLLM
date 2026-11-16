@@ -916,8 +916,7 @@ public static class ServerStartup
             prefixTrieManager: prefixTrieManager,
             prefixCacheHeadroomTokens: prefixCacheHeadroom,
             prefillChunkSize: options.PrefillChunkSize,
-            recurrentPrefixCacheOptions: options.GetPrefixSnapshotOptions(),
-            deviceId: model is DotLLM.Hip.HipTransformerModel hipDeviceModel ? hipDeviceModel.DeviceId : -1);
+            recurrentPrefixCacheOptions: options.GetPrefixSnapshotOptions());
         if (options.PrefillChunkSize > 0)
             Console.WriteLine($"[dotllm] Prefill chunk size: {options.PrefillChunkSize} tokens per forward pass");
         if (options.PromptLookup is { } lookup)

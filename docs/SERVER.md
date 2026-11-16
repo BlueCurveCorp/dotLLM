@@ -711,7 +711,7 @@ It supports dense Llama GGUF (F16/Q4_0/Q8_0 matrices) and HF SafeTensors (F16 ma
 K and V independently select F16 or Q8_0; Q8_0 requires head dimensions divisible by 32. Partial layer offload, F32/Q4_0 KV and mixed-precision windows fail explicitly. `/v1/devices` reports per-device HIP readiness;
 the WebUI lists only usable HIP devices and keeps them explicit choices. See [HIP.md](HIP.md) for prerequisites and limits.
 
-HIP defaults to F16 KV. Q8_0 on either plane requires `DOTLLM_HIP_ALLOW_Q8_KV=1` in the server process environment to acknowledge measured precision loss; without it, startup rejects the option before opening the model. Q8 failed the original 1K–8K logit quality gates. See [precision measurements](PRECISION.md#actual-1k8k-histories).
+HIP defaults to F16 KV. Q8_0 uses the standard cache-type options without a HIP-specific environment gate. Q8 failed the original 1K–8K logit quality gates; see [precision measurements](PRECISION.md#actual-1k8k-histories).
 
 Local HuggingFace directories also load on CPU (`cpu` or `auto`). The existing HF config,
 tokenizer and single-file/sharded readers are reused. A model owns its SafeTensors source

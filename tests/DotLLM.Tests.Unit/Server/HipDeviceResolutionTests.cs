@@ -22,6 +22,22 @@ public sealed class HipDeviceResolutionTests
 
     private static DeviceListResponse Devices(BackendInfoDto hip) => new() { Backends = [hip] };
 
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(true, 2)]
+    public void Inventory_OnlyInitializesHipWhenReadinessIsRequested(bool validateReadiness, int expectedCalls)
+    {
+        int calls = 0;
+        var backend = DeviceEndpoint.DescribeHip(() => true, () => 2,
+            i => new DeviceInfoDto { Index = i, Name = $"AMD {i}" },
+            _ => calls++, validateReadiness);
+        Assert.Equal(expectedCalls, calls);
+        Assert.True(backend.Available);
+        Assert.Equal(validateReadiness, backend.Servable);
+        Assert.All(backend.Devices, device => Assert.Equal(validateReadiness, device.Servable));
+        Assert.Equal(["cpu"], DeviceSelector.Plan(DeviceSpec.Parse("auto"), GiB, Devices(backend)).Candidates);
+    }
+
     [Fact]
     public void RuntimeAbsence_DoesNotEnumerateOrOfferHip()
     {
@@ -130,48 +146,7 @@ public sealed class HipDeviceResolutionTests
     [InlineData(null, null, 16, false)]
     public void CacheOptions_AllowF16OrQ8_NoMixedPrecisionWindow(string? key, string? value, int window, bool valid)
     {
-        using var environment = new HipQ8Environment("1");
         Assert.Equal(valid, DeviceModelLoader.HipKvOptionError("hip:1", key, value, window) is null);
-    }
-
-    [Theory]
-    [InlineData(null, false)]
-    [InlineData("0", false)]
-    [InlineData("true", false)]
-    [InlineData("false", false)]
-    [InlineData(" 1 ", false)]
-    [InlineData("1", true)]
-    public void Q8Kv_RequiresExplicitAcknowledgementForEitherPlane(string? optIn, bool allowed)
-    {
-        using var environment = new HipQ8Environment(optIn);
-        Assert.Null(DeviceModelLoader.HipKvOptionError("hip", null, null));
-        Assert.Null(DeviceModelLoader.HipKvOptionError("hip", "f16", "fp16"));
-        Assert.Null(DeviceModelLoader.HipKvOptionError("cpu", "q8_0", "q8_0"));
-        Assert.Null(HipPagedKvCache.ExperimentalQ8Error(KvCacheDType.F32, KvCacheDType.F32));
-        foreach (var (key, value) in new[] { ("q8_0", "f16"), ("f16", "q8_0"), (" Q8_0 ", "q8_0") })
-        {
-            string? error = DeviceModelLoader.HipKvOptionError("hip:0", key, value);
-            Assert.Equal(allowed, error is null);
-            if (!allowed)
-            {
-                Assert.Contains("precision loss", error, StringComparison.Ordinal);
-                Assert.Contains("DOTLLM_HIP_ALLOW_Q8_KV=1", error, StringComparison.Ordinal);
-            }
-        }
-    }
-
-    [Theory]
-    [InlineData("q8_0", null)]
-    [InlineData(null, "q8_0")]
-    public void Server_RejectsUnacknowledgedQ8BeforeOpeningTheModel(string? key, string? value)
-    {
-        using var environment = new HipQ8Environment(null);
-        var error = Assert.Throws<InvalidServerOptionException>(() =>
-        {
-            using var rejected = ServerStartup.LoadModel("does-not-exist.gguf",
-                new ServerOptions { Model = "test", Device = "hip:0", CacheTypeK = key, CacheTypeV = value });
-        });
-        Assert.Contains("DOTLLM_HIP_ALLOW_Q8_KV=1", error.Message, StringComparison.Ordinal);
     }
 
     [Theory]

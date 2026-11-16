@@ -7,7 +7,7 @@ using Xunit;
 
 namespace DotLLM.Tests.Unit.Cli;
 
-/// <summary>Issue #790: the CLI's <c>--device</c> option - defaults, validation, and the CPU-only checkpoint rule.</summary>
+/// <summary>Issue #790: the CLI's <c>--device</c> option - defaults and validation.</summary>
 public sealed class DeviceOptionTests
 {
     private static string? AttributeDefault<T>() =>
@@ -47,31 +47,6 @@ public sealed class DeviceOptionTests
     [InlineData("metal", false)]
     public void Validate_MatchesTheSharedParser(string device, bool valid) =>
         Assert.Equal(valid, DeviceCli.Validate(device) is null);
-
-    [Theory]
-    [InlineData("vulkan")]
-    [InlineData("gpu")]
-    [InlineData("cuda")]
-    [InlineData("hip")]
-    [InlineData("hip:1")]
-    public void CpuOnlyCheckpoint_WithExplicitGpu_IsAnError(string device)
-    {
-        var ex = Assert.Throws<DeviceUnavailableException>(() => DeviceCli.ResolveCpuOnly(device, "HuggingFace safetensors checkpoints", "m"));
-        Assert.Contains("--device cpu", ex.Message);
-    }
-
-    [Fact]
-    public void CpuOnlyCheckpoint_UnderAuto_IsCpuWithAWarning_AndUnderCpuIsSilent()
-    {
-        var auto = DeviceCli.ResolveCpuOnly("auto", "HuggingFace safetensors checkpoints", "m");
-        Assert.Equal("cpu", auto.Resolved);
-        Assert.NotNull(auto.Warning);
-        Assert.Contains("auto -> cpu", auto.Line);
-
-        var cpu = DeviceCli.ResolveCpuOnly("cpu", "HuggingFace safetensors checkpoints", "m");
-        Assert.Null(cpu.Warning);
-        Assert.Equal("device: cpu", cpu.Line);
-    }
 
     [Theory]
     [InlineData("run", "--cache-type-k", "f32")]
