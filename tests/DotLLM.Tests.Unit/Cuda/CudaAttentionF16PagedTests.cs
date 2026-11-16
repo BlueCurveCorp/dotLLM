@@ -280,4 +280,202 @@ public sealed class CudaAttentionF16PagedTests : IDisposable
             CudaDriverApi.cuMemcpyDtoH_v2((nint)p, devicePtr, (nuint)(count * sizeof(nint))).ThrowOnError();
         return host;
     }
+
+    // ── Issue #1839: all-layer block-pointer arrays, upload-on-change, paged fused RoPE+KV write ──
+
+    private static unsafe void UploadFp16(nint devicePtr, ushort[] host)
+    {
+        fixed (ushort* p = host)
+            CudaDriverApi.cuMemcpyHtoD_v2(devicePtr, (nint)p, (nuint)(host.Length * sizeof(ushort))).ThrowOnError();
+    }
+
+    private static ushort[] RandomFp16(Random rng, int count)
+    {
+        var host = new ushort[count];
+        for (int i = 0; i < count; i++)
+            host[i] = BitConverter.HalfToUInt16Bits((Half)(rng.NextDouble() * 2.0 - 1.0));
+        return host;
+    }
+
+    [SkippableFact]
+    public void PrepareNativeBlockPtrs_MultiLayerScatteredBlocks_ResolveEachLayersPoolAndUploadOnce()
+    {
+        // Three layers, and a second cache interleaving its allocations so this cache's physical
+        // blocks are NOT consecutive: a wrong layer offset into the combined array, or a pointer
+        // derived from the logical block index instead of the physical ID, both show up here.
+        Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available");
+        const int layers = 3, numKvHeads = 2, headDim = 16;
+        int kvStride = numKvHeads * headDim;
+
+        using var pool = new CudaKvBlockPool(layers, numKvHeads, headDim, BlockSize, TotalBlocks, _ctx);
+        using var cache = new CudaPagedKvCache(pool, MaxSeqLen);
+        using var other = new CudaPagedKvCache(pool, MaxSeqLen);
+
+        nint kRow = AllocAndFillDeviceFp16(kvStride, e => e * 0.0625f);
+        nint vRow = AllocAndFillDeviceFp16(kvStride, e => 1 + e * 0.0625f);
+        try
+        {
+            nint s = _stream!.Handle;
+            int seqKv = BlockSize * 4 + 1;
+            for (int pos = 0; pos < seqKv; pos++)
+            {
+                for (int layer = 0; layer < layers; layer++)
+                {
+                    cache.UpdateDevice(kRow, vRow, [pos], 1, layer, s);
+                    other.UpdateDevice(kRow, vRow, [pos], 1, layer, s);
+                }
+            }
+            _stream.Synchronize();
+            Assert.NotEqual(cache.BlockTable.BlockIdAt(0) + 1, cache.BlockTable.BlockIdAt(1)); // scattered
+
+            for (int layer = 0; layer < layers; layer++)
+            {
+                var (kDev, vDev, blockCount) = cache.PrepareNativeBlockPtrs(layer, s);
+                _stream.Synchronize();
+                Assert.Equal((seqKv + BlockSize - 1) / BlockSize, blockCount);
+                var kHost = ReadDevicePtrArray(kDev, blockCount);
+                var vHost = ReadDevicePtrArray(vDev, blockCount);
+                for (int b = 0; b < blockCount; b++)
+                {
+                    int id = cache.BlockTable.BlockIdAt(b);
+                    Assert.Equal(pool.GetKeyPtr(id, layer), kHost[b]);
+                    Assert.Equal(pool.GetValuePtr(id, layer), vHost[b]);
+                }
+            }
+
+            // One upload served every layer; asking again without a table change does not re-upload.
+            Assert.Equal(1, cache.BlockPtrUploads);
+            cache.PrepareNativeBlockPtrs(0, s);
+            Assert.Equal(1, cache.BlockPtrUploads);
+        }
+        finally
+        {
+            CudaDriverApi.cuMemFree_v2(kRow);
+            CudaDriverApi.cuMemFree_v2(vRow);
+        }
+    }
+
+    [SkippableFact]
+    public void PrepareNativeBlockPtrs_ReUploadsAfterCopyOnWrite()
+    {
+        // Prefix sharing: the target is seeded with the source's blocks, uploads its pointers, then
+        // rolls back into a shared block and writes, which copies-on-write that block. The next call
+        // must point at the NEW physical block, not the shared one the source still owns.
+        Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available");
+        const int numKvHeads = 2, headDim = 16;
+        int kvStride = numKvHeads * headDim;
+
+        using var pool = CreatePool(numKvHeads, headDim);
+        using var source = new CudaPagedKvCache(pool, MaxSeqLen);
+        using var target = new CudaPagedKvCache(pool, MaxSeqLen);
+        FillCacheIncrementally(source, BlockSize * 2, kvStride);
+
+        var ids = new List<int>();
+        source.SnapshotFullBlocks(BlockSize * 2, ids);
+        foreach (int id in ids) pool.AddRef(id);
+        target.SeedSharedPrefix(ids, BlockSize * 2);
+
+        nint s = _stream!.Handle;
+        var (k0, _, n0) = target.PrepareNativeBlockPtrs(0, s);
+        _stream.Synchronize();
+        Assert.Equal(pool.GetKeyPtr(ids[1], 0), ReadDevicePtrArray(k0, n0)[1]);
+        Assert.Equal(1, target.BlockPtrUploads);
+
+        target.Rollback(BlockSize + 1);
+        nint kRow = AllocAndFillDeviceFp16(kvStride, e => 7.0f);
+        nint vRow = AllocAndFillDeviceFp16(kvStride, e => 8.0f);
+        try
+        {
+            target.UpdateDevice(kRow, vRow, [BlockSize + 1], 1, 0, s);
+            int cowId = target.BlockTable.BlockIdAt(1);
+            Assert.NotEqual(ids[1], cowId);
+
+            var (k1, v1, n1) = target.PrepareNativeBlockPtrs(0, s);
+            _stream.Synchronize();
+            Assert.Equal(2, target.BlockPtrUploads);
+            Assert.Equal(pool.GetKeyPtr(cowId, 0), ReadDevicePtrArray(k1, n1)[1]);
+            Assert.Equal(pool.GetValuePtr(cowId, 0), ReadDevicePtrArray(v1, n1)[1]);
+            Assert.Equal(pool.GetKeyPtr(ids[0], 0), ReadDevicePtrArray(k1, n1)[0]); // still shared
+        }
+        finally
+        {
+            CudaDriverApi.cuMemFree_v2(kRow);
+            CudaDriverApi.cuMemFree_v2(vRow);
+        }
+    }
+
+    [SkippableFact]
+    public unsafe void PagedFusedRopeKvWrite_MatchesContiguousFusedWrite_BitExact()
+    {
+        // The paged decode write (FusedRopeAndUpdateDevice: block base + offset-in-block) must put
+        // the same rotated K and the same V in the same logical rows as CudaKvCache's fused write,
+        // and rotate Q identically. Two layers, scattered blocks (a second cache interleaves its
+        // allocations), and a length past two block boundaries.
+        Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available");
+        string? ptxDir = FindPtxDir();
+        Skip.If(ptxDir == null, "PTX files not found");
+        using var kernels = new CudaKernels(ptxDir!);
+        Skip.IfNot(kernels.HasFusedRopeKvWriteKernel, "fused_rope_kv_write not present in PTX");
+
+        const int layers = 2, numHeads = 8, numKvHeads = 2, headDim = 64, ropeDim = 64;
+        const float theta = 10000f;
+        const int ropeType = 1; // neox
+        int kvStride = numKvHeads * headDim, qStride = numHeads * headDim;
+        int seqKv = BlockSize * 2 + 3;
+
+        using var pool = new CudaKvBlockPool(layers, numKvHeads, headDim, BlockSize, TotalBlocks, _ctx);
+        using var paged = new CudaPagedKvCache(pool, MaxSeqLen);
+        using var other = new CudaPagedKvCache(pool, MaxSeqLen);
+        using var flat = new CudaKvCache(layers, numKvHeads, headDim, MaxSeqLen, _ctx);
+
+        CudaDriverApi.cuMemAlloc_v2(out nint qA, (nuint)(qStride * sizeof(ushort))).ThrowOnError();
+        CudaDriverApi.cuMemAlloc_v2(out nint qB, (nuint)(qStride * sizeof(ushort))).ThrowOnError();
+        CudaDriverApi.cuMemAlloc_v2(out nint k, (nuint)(kvStride * sizeof(ushort))).ThrowOnError();
+        CudaDriverApi.cuMemAlloc_v2(out nint v, (nuint)(kvStride * sizeof(ushort))).ThrowOnError();
+        CudaDriverApi.cuMemAlloc_v2(out nint posDev, sizeof(int)).ThrowOnError();
+        try
+        {
+            nint s = _stream!.Handle;
+            var rng = new Random(1839);
+            for (int pos = 0; pos < seqKv; pos++)
+            {
+                int p = pos;
+                CudaDriverApi.cuMemcpyHtoD_v2(posDev, (nint)(&p), sizeof(int)).ThrowOnError();
+                for (int layer = 0; layer < layers; layer++)
+                {
+                    var qHost = RandomFp16(rng, qStride);
+                    UploadFp16(qA, qHost);
+                    UploadFp16(qB, qHost);
+                    UploadFp16(k, RandomFp16(rng, kvStride));
+                    UploadFp16(v, RandomFp16(rng, kvStride));
+
+                    flat.FusedRopeAndUpdateDevice(qA, k, v, posDev, pos, layer,
+                        numHeads, numKvHeads, headDim, ropeDim, theta, ropeType, s, kernels);
+                    paged.FusedRopeAndUpdateDevice(qB, k, v, posDev, pos, layer,
+                        numHeads, numKvHeads, headDim, ropeDim, theta, ropeType, s, kernels);
+                    other.UpdateDevice(k, v, [pos], 1, layer, s);
+                    _stream.Synchronize();
+                    Assert.Equal(ReadDeviceFp16(qA, qStride), ReadDeviceFp16(qB, qStride));
+                }
+            }
+            Assert.Equal(seqKv, paged.CurrentLength);
+            Assert.NotEqual(paged.BlockTable.BlockIdAt(0) + 1, paged.BlockTable.BlockIdAt(1)); // scattered
+
+            for (int layer = 0; layer < layers; layer++)
+            {
+                var (kG, vG) = paged.PrepareAttentionScratch(layer, s);
+                _stream.Synchronize();
+                Assert.Equal(ReadDeviceFp16(flat.GetKeysPtr(layer), seqKv * kvStride), ReadDeviceFp16(kG, seqKv * kvStride));
+                Assert.Equal(ReadDeviceFp16(flat.GetValuesPtr(layer), seqKv * kvStride), ReadDeviceFp16(vG, seqKv * kvStride));
+            }
+        }
+        finally
+        {
+            CudaDriverApi.cuMemFree_v2(qA);
+            CudaDriverApi.cuMemFree_v2(qB);
+            CudaDriverApi.cuMemFree_v2(k);
+            CudaDriverApi.cuMemFree_v2(v);
+            CudaDriverApi.cuMemFree_v2(posDev);
+        }
+    }
 }

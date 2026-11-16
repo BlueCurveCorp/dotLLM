@@ -31,7 +31,7 @@ namespace DotLLM.Cuda;
 /// duplication (<see cref="CopyBlock"/>) touch the device.
 /// </para>
 /// </remarks>
-public sealed class CudaKvBlockPool : IDisposable
+public sealed class CudaKvBlockPool : IDisposable, ICudaKvBlockAllocator
 {
     private readonly int _blockSize;
     private readonly int _numLayers;

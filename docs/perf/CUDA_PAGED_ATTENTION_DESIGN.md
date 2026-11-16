@@ -2,6 +2,19 @@
 
 **Issue:** #200
 **Author:** dotnet-perf-expert agent, 2026-08-01
+> **Update (issue #1839, 2026-11-16): now the default for decode.** Measured on an RTX 3060 (framework,
+> TwIL-8B Q4_K_M, 670-token prompt): the gather path decoded at 6.8 tok/s against 34.7 non-paged, a
+> fixed ~30 µs per `cuMemcpyDtoDAsync` x ~3,440 copies per token. This kernel as shipped by #200
+> reached 21.6 tok/s; its two synchronous per-layer H2D pointer copies were most of the rest. #1839
+> uploads every layer's pointer arrays together only when the block table's version changes, fuses the
+> decode RoPE + KV write (`CudaPagedKvCache.FusedRopeAndUpdateDevice`), and rewrites the kernel's V loop
+> to walk one block run at a time (the old loop did a runtime div/mod and a dependent pointer load on
+> every serial iteration). Result: 32.1-32.3 tok/s against 34.4-34.7 non-paged at 670 tokens, and
+> 14.2 against 17.3 at 4,020 tokens, with identical greedy text. `DOTLLM_ATTN_PAGED_NATIVE=0` opts out.
+> Refuted on the way: staging each tile's block pointers in shared memory made 4K decode slower
+> (14.2 -> 10.6 tok/s), likely because the row loads lose the read-only global path once the pointer
+> comes from shared memory. See `docs/KV_CACHE.md`'s CUDA section.
+
 **Status:** Implemented (2026-08-02, opt-in via `DOTLLM_ATTN_PAGED_NATIVE=1`, default OFF pending
 real-hardware measurement) — see the "Update (issue #200, implemented 2026-08-02)" note directly
 below for what shipped. Originally design-only, confirming and extending the two prior comments on

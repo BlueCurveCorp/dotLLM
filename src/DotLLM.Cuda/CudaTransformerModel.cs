@@ -237,6 +237,23 @@ public sealed unsafe class CudaTransformerModel : IModel
     public bool UseGraphCapture { get; set; }
 
     /// <summary>
+    /// Paged-cache attention calls that read the block pool in place (<c>attention_f16_paged</c>),
+    /// one per layer per decode step (issue #1839). Diagnostics: proves which paged path ran.
+    /// </summary>
+    internal long PagedNativeAttentionCalls { get; private set; }
+
+    /// <summary>Paged-cache attention calls that took the gather-into-scratch path (prefill, sinks, opt-out).</summary>
+    internal long PagedGatherAttentionCalls { get; private set; }
+
+    /// <summary>
+    /// Whether a paged-cache attention call reads the pool in place instead of gathering it
+    /// (issue #200 / #1839): single-token decode, no attention sinks (the paged kernel has no sink
+    /// epilogue), the kill-switch not set, and the kernel present in the loaded PTX.
+    /// </summary>
+    internal static bool UsePagedNativeAttention(int seqLen, nint layerSinks, bool enabled, bool hasKernel)
+        => seqLen == 1 && layerSinks == 0 && enabled && hasKernel;
+
+    /// <summary>
     /// Every forward returns the last row's logits only (the LM head runs on one row), so a multi-token verify cannot be
     /// checked row by row. Declared so speculative callers (prompt lookup, #1293) see it instead of reading past the buffer.
     /// </summary>
@@ -1514,6 +1531,14 @@ public sealed unsafe class CudaTransformerModel : IModel
             bool useFusedRopeKv = seqLen == 1
                 && kvCache is CudaKvCache
                 && _kernels.HasFusedRopeKvWriteKernel;
+            // #1839: the paged twin. One fused launch writes the decode row straight into its pool
+            // block, instead of an eager RoPE launch plus two D2D copies. Never during capture
+            // (capture requires a CudaKvCache).
+            bool usePagedFusedRopeKv = seqLen == 1
+                && !capturing
+                && kvCache is CudaPagedKvCache
+                && CudaKernels.EnableNativePagedAttention
+                && _kernels.HasFusedRopeKvWriteKernel;
 
             // NoPE layers (Flint's full-attention layers, #1172): rotate nothing. The fused kernel with rope_dim 0
             // copies all of K as its "tail", so the KV write is unchanged.
@@ -1558,7 +1583,8 @@ public sealed unsafe class CudaTransformerModel : IModel
             else
             {
                 // Eager fallback path (prefill seqLen>1, quantized KV, or no fused kernel).
-                if (!noRope)
+                // The paged fused path applies RoPE inside its KV-write kernel below.
+                if (!noRope && !usePagedFusedRopeKv)
                     _kernels.LaunchRoPE(qPtr, kPtr, _state.PositionsDevice,
                         seqLen, numHeads, numKvHeads, headDim,
                         _ropeDim, _ropeTheta, effectiveRopeType, s,
@@ -1635,12 +1661,23 @@ public sealed unsafe class CudaTransformerModel : IModel
                 else if (kvCache is CudaPagedKvCache cudaPagedKvCache)
                 {
                     // Issue #252: block-scattered storage. Write into the (possibly newly
-                    // allocated / CoW'd) block(s).
-                    cudaPagedKvCache.UpdateDevice(kPtr, vPtr, positions, seqLen, layer, s);
+                    // allocated / CoW'd) block(s). #1839: decode fuses RoPE into that write.
+                    if (usePagedFusedRopeKv)
+                        cudaPagedKvCache.FusedRopeAndUpdateDevice(
+                            qPtr, kPtr, vPtr,
+                            _state.PositionsDevice, positions[0],
+                            layer,
+                            numHeads, numKvHeads, headDim,
+                            layerRopeDim, _ropeTheta, effectiveRopeType,
+                            s, _kernels, _ropeYarnInvFreq, _ropeYarnMscale);
+                    else
+                        cudaPagedKvCache.UpdateDevice(kPtr, vPtr, positions, seqLen, layer, s);
                     int seqKv = cudaPagedKvCache.CurrentLength;
 
-                    // Issue #200 (opt-in, DOTLLM_ATTN_PAGED_NATIVE=1): decode-only (seqLen==1)
-                    // direct block-table-read attention, skipping the gather below entirely.
+                    // Issue #200, default since #1839 (DOTLLM_ATTN_PAGED_NATIVE=0 opts out):
+                    // decode-only (seqLen==1) direct block-table-read attention, skipping the
+                    // gather below entirely. The gather cost two D2D copies per block per layer
+                    // per step, i.e. it scaled with context: 4.8x slower decode at 686 tokens.
                     // Restricted to decode because that's this issue's scope (title: "paged
                     // decode attention kernel") and because prefill already prefers G3/flash,
                     // which need a contiguous buffer regardless — extending the paged-native
@@ -1649,12 +1686,12 @@ public sealed unsafe class CudaTransformerModel : IModel
                     // `layerSinks == 0`: attention_f16_paged is a deliberately separate entry
                     // point that did NOT receive the #365 sink epilogue, so a sink-bearing layer
                     // must fall through to the gather + DispatchAttention path below (which
-                    // reaches sink-aware attention_f16). Safe to route away from unconditionally:
-                    // this kernel is opt-in and default-OFF. Sink support in the paged kernel is
+                    // reaches sink-aware attention_f16). Sink support in the paged kernel is
                     // a follow-up perf issue (Task 6); correctness first.
-                    if (seqLen == 1 && layerSinks == 0
-                        && CudaKernels.EnableNativePagedAttention && _kernels.HasAttentionF16Paged)
+                    if (UsePagedNativeAttention(seqLen, layerSinks,
+                            CudaKernels.EnableNativePagedAttention, _kernels.HasAttentionF16Paged))
                     {
+                        PagedNativeAttentionCalls++;
                         var (kBlockPtrs, vBlockPtrs, _) = cudaPagedKvCache.PrepareNativeBlockPtrs(layer, s);
                         MarkProfile(ProfileCategory.KvUpdate);
                         _kernels.LaunchAttentionPaged(qPtr, kBlockPtrs, vBlockPtrs, _state.AttnOutput,
@@ -1664,9 +1701,10 @@ public sealed unsafe class CudaTransformerModel : IModel
                     }
                     else
                     {
-                        // Default: gather into the contiguous scratch buffer the existing
-                        // attention kernels expect — same staging-buffer shape as the CPU
-                        // PagedKvCache.
+                        // Prefill / sinks / opt-out / stale PTX: gather into the contiguous
+                        // scratch buffer the existing attention kernels expect — same
+                        // staging-buffer shape as the CPU PagedKvCache.
+                        PagedGatherAttentionCalls++;
                         var (kCachePtr, vCachePtr) = cudaPagedKvCache.PrepareAttentionScratch(layer, s);
                         MarkProfile(ProfileCategory.KvUpdate);
                         DispatchAttention(kCachePtr, vCachePtr, seqKv, positions[0]);

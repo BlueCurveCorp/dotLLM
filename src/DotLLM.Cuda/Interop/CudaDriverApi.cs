@@ -329,7 +329,10 @@ internal static partial class CudaDriverApi
     internal static partial int cuMemcpyDtoD_v2(
         nint dstDevice, nint srcDevice, nuint byteCount);
 
-    /// <summary>CU_MEMORYTYPE_DEVICE — the only memory type <see cref="cuMemcpy2DAsync_v2"/> is used with here.</summary>
+    /// <summary>CU_MEMORYTYPE_HOST — a host (here: pinned) source for <see cref="cuMemcpy2DAsync_v2"/> (issue #1839).</summary>
+    internal const uint CU_MEMORYTYPE_HOST = 1;
+
+    /// <summary>CU_MEMORYTYPE_DEVICE.</summary>
     internal const uint CU_MEMORYTYPE_DEVICE = 2;
 
     /// <summary>
